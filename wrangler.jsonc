@@ -3,6 +3,7 @@
   "name": "brain-worker",
   "main": "worker.ts",
   "compatibility_date": "2024-09-27",
+  "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
       {
@@ -14,7 +15,15 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_classes": ["RpcHub"]
+      "new_classes": [
+        "RpcHub"
+      ]
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "AUDIO_BUCKET",
+      "bucket_name": "brain-audio"
     }
   ]
 }
