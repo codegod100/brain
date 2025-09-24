@@ -1,8 +1,15 @@
 {
 	"type": "module",
+	"scripts": {
+		"gui": "./node_modules/@nodegui/qode/binaries/qode --loader tsx gui.ts"
+	},
 	"dependencies": {
+		"@nodegui/nodegui": "^0.73.0",
 		"@types/play-sound": "^1.1.2",
 		"capnweb": "^0.1.0",
 		"play-sound": "^1.1.6"
+	},
+	"devDependencies": {
+		"tsx": "^4.20.5"
 	}
 }

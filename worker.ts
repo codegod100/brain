@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { RpcStub, RpcTarget, newWebSocketRpcSession } from "capnweb";
 
 const PROJECT_FILES = [
@@ -144,6 +145,55 @@ class HubApi extends RpcTarget {
             }),
         );
         return this.clients.length;
+    }
+
+    async uploadAudioBase64(filename: string, base64Data: string, contentTypeHint?: string) {
+        if (!(this as any).env?.AUDIO_BUCKET) {
+            throw new Error("AUDIO_BUCKET binding is not configured");
+        }
+
+        if (!filename || typeof filename !== "string") {
+            throw new TypeError("filename must be a non-empty string");
+        }
+
+        if (!base64Data || typeof base64Data !== "string") {
+            throw new TypeError("base64Data must be a non-empty string");
+        }
+
+        let bytes: Uint8Array;
+        try {
+            const binary = atob(base64Data);
+            bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i += 1) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+        } catch (error) {
+            throw new TypeError(`Failed to decode base64 data: ${error instanceof Error ? error.message : String(error)}`);
+        }
+
+        const contentType =
+            contentTypeHint ??
+            (filename.endsWith('.mp3')
+                ? 'audio/mpeg'
+                : filename.endsWith('.wav')
+                ? 'audio/wav'
+                : filename.endsWith('.ogg')
+                ? 'audio/ogg'
+                : 'application/octet-stream');
+
+        await (this as any).env.AUDIO_BUCKET.put(filename, bytes, {
+            httpMetadata: {
+                contentType,
+            },
+        });
+
+        console.log(`Uploaded ${filename} (${bytes.length} bytes) to R2`);
+
+        return {
+            filename,
+            size: bytes.length,
+            contentType,
+        };
     }
 
     async runCommand(command: string, clientId?: string) {
@@ -776,6 +826,76 @@ export default {
             } catch (error) {
                 console.error('Error serving audio file:', error);
                 return new Response('Internal server error', { status: 500 });
+            }
+        }
+
+        if (url.pathname === '/upload' && request.method === 'POST') {
+            let payload: { filename?: string; base64?: string; contentType?: string };
+            try {
+                payload = await request.json();
+            } catch (error) {
+                return new Response(
+                    JSON.stringify({ error: 'Invalid JSON body', details: error instanceof Error ? error.message : String(error) }),
+                    {
+                        status: 400,
+                        headers: { 'Content-Type': 'application/json' },
+                    },
+                );
+            }
+
+            const { filename, base64, contentType } = payload;
+
+            if (!filename || typeof filename !== 'string') {
+                return new Response(JSON.stringify({ error: 'filename is required' }), {
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' },
+                });
+            }
+
+            if (!base64 || typeof base64 !== 'string') {
+                return new Response(JSON.stringify({ error: 'base64 is required' }), {
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' },
+                });
+            }
+
+            try {
+                const bytes = Uint8Array.from(Buffer.from(base64, 'base64'));
+                const inferredContentType =
+                    contentType ||
+                    (filename.endsWith('.mp3')
+                        ? 'audio/mpeg'
+                        : filename.endsWith('.wav')
+                        ? 'audio/wav'
+                        : filename.endsWith('.ogg')
+                        ? 'audio/ogg'
+                        : filename.endsWith('.flac')
+                        ? 'audio/flac'
+                        : filename.endsWith('.m4a')
+                        ? 'audio/mp4'
+                        : 'application/octet-stream');
+
+                await env.AUDIO_BUCKET.put(filename, bytes, {
+                    httpMetadata: {
+                        contentType: inferredContentType,
+                    },
+                });
+
+                return new Response(
+                    JSON.stringify({ filename, size: bytes.length, contentType: inferredContentType }),
+                    {
+                        status: 200,
+                        headers: { 'Content-Type': 'application/json' },
+                    },
+                );
+            } catch (error) {
+                return new Response(
+                    JSON.stringify({ error: 'Upload failed', details: error instanceof Error ? error.message : String(error) }),
+                    {
+                        status: 500,
+                        headers: { 'Content-Type': 'application/json' },
+                    },
+                );
             }
         }
         
