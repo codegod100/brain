@@ -7,6 +7,39 @@ import * as http from "node:http";
 import * as https from "node:https";
 import player from "play-sound";
 
+// Parse command line arguments
+function parseArgs() {
+  const args = process.argv.slice(2);
+  let host = "ws://localhost:8787";
+  
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--host" || arg === "-h") {
+      if (i + 1 < args.length) {
+        host = args[i + 1];
+        i++; // Skip next arg
+      } else {
+        console.error("Error: --host requires a value");
+        process.exit(1);
+      }
+    } else if (arg === "--help") {
+      console.log("Usage: node client.ts [options]");
+      console.log("Options:");
+      console.log("  --host, -h <host>    WebSocket host to connect to (default: ws://localhost:8787)");
+      console.log("  --help               Show this help message");
+      process.exit(0);
+    } else {
+      console.error(`Unknown argument: ${arg}`);
+      console.error("Use --help for usage information");
+      process.exit(1);
+    }
+  }
+  
+  return { host };
+}
+
+const { host } = parseArgs();
+
 type ClientDescriptor = {
   id: string;
   joinedAt: string;
@@ -17,12 +50,31 @@ class Client extends RpcTarget {
   broadcast(message: unknown) {
     if (typeof message === "string") {
       console.log(`Incoming message! ${message}`);
-    } else {
+    } else if (typeof message === "object" && message !== null) {
+      const msg = message as any;
+      if (msg.type === "play-audio" && msg.filename) {
+        // Don't play if this broadcast is from ourselves
+        if (msg.from === descriptor.id) {
+          console.log(`🎵 You initiated audio broadcast: ${msg.filename}`);
+          return;
+        }
+        console.log(`🎵 Incoming audio broadcast: ${msg.filename} from ${msg.from || 'unknown'}`);
+        // Construct the audio URL based on our host
+        const httpHost = host.replace(/^ws/, 'http');
+        const audioUrl = `${httpHost}/audio/${msg.filename}`;
+        // Play the audio asynchronously
+        playAudio(audioUrl, msg.filename).catch(err => {
+          console.error(`Failed to play broadcasted audio: ${err}`);
+        });
+        return;
+      }
       try {
         console.log("Incoming message!\n" + JSON.stringify(message, null, 2));
       } catch (error) {
         console.log("Incoming message!", message);
       }
+    } else {
+      console.log("Incoming message!", message);
     }
   }
 }
@@ -33,7 +85,7 @@ type HubApi = {
   runCommand(command: string, clientId?: string): Promise<unknown>;
 };
 
-const api = newWebSocketRpcSession<HubApi>("ws://localhost:8787");
+const api = newWebSocketRpcSession<HubApi>(host);
 const descriptor: ClientDescriptor = {
   id: randomUUID(),
   joinedAt: new Date().toISOString(),
@@ -42,6 +94,7 @@ const descriptor: ClientDescriptor = {
 
 const client = new Client();
 const total = await api.addClient(client, descriptor);
+console.log(`Connected to: ${host}`);
 console.log(`Connected clients: ${total}`);
 console.log('Commands available: type "files" or "help"; "exit" to quit.');
 
@@ -139,6 +192,41 @@ try {
       }
       continue;
     }
+    if (command.startsWith("broadcast-play ")) {
+      const audioFile = command.slice(14).trim();
+      if (audioFile) {
+        try {
+          // First check if the audio file exists
+          const audioResponse = await api.runCommand(`audio get ${audioFile}`, descriptor.id) as any;
+          if (audioResponse.exists) {
+            console.log(`🎵 Broadcasting audio: ${audioFile} to all peers`);
+            
+            // Broadcast the play command to all clients
+            const broadcastMessage = {
+              type: "play-audio",
+              filename: audioFile,
+              from: descriptor.id,
+              timestamp: new Date().toISOString()
+            };
+            
+            await api.broadcast(broadcastMessage);
+            console.log("Broadcast sent!");
+            
+            // Also play it locally
+            const httpHost = host.replace(/^ws/, 'http');
+            const audioUrl = `${httpHost}/audio/${audioFile}`;
+            await playAudio(audioUrl, audioFile);
+          } else {
+            console.error("Audio file not found");
+          }
+        } catch (error) {
+          console.error("Failed to broadcast audio", error);
+        }
+      } else {
+        console.error("Usage: broadcast-play <filename>");
+      }
+      continue;
+    }
     if (command.startsWith("play ")) {
       const audioFile = command.slice(5).trim();
       if (audioFile) {
@@ -150,13 +238,13 @@ try {
             console.log(`   Size: ${audioResponse.size} bytes`);
             console.log(`   Type: ${audioResponse.contentType || 'unknown'}`);
             
-            // Play the audio if URL is available
-            if (audioResponse.url) {
-              await playAudio(audioResponse.url, audioFile);
-            } else {
-              console.log(`   Message: ${audioResponse.message}`);
-              console.log(`   To play: Configure R2 public access or use signed URLs`);
-            }
+            // Construct the audio URL based on the host we're connected to
+            // Convert ws:// or wss:// to http:// or https://
+            const httpHost = host.replace(/^ws/, 'http');
+            const audioUrl = `${httpHost}/audio/${audioFile}`;
+            
+            // Play the audio
+            await playAudio(audioUrl, audioFile);
           } else {
             console.error("Audio file not found");
           }

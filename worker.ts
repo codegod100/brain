@@ -543,7 +543,6 @@ class HubApi extends RpcTarget {
                             size: object.size,
                             contentType: object.httpMetadata?.contentType,
                             exists: true,
-                            url: `http://localhost:8787/audio/${filename}`, // Placeholder URL
                             message: "Audio file found. Use a media player to stream from R2."
                         };
                     } catch (error) {
