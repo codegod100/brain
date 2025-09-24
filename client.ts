@@ -6,6 +6,7 @@ import { RpcTarget, newWebSocketRpcSession } from "capnweb";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as https from "node:https";
+import net from "node:net";
 import player from "play-sound";
 
 // Parse command line arguments
@@ -43,6 +44,10 @@ const { host } = parseArgs();
 const CONTROL_HOST = process.env.CLIENT_HTTP_HOST ?? "127.0.0.1";
 const CONTROL_PORT = Number.parseInt(process.env.CLIENT_HTTP_PORT ?? "4455", 10);
 const CONTROL_URL = `http://${CONTROL_HOST}:${CONTROL_PORT}`;
+const CONTROL_SOCKET_PORT = Number.parseInt(process.env.CLIENT_SOCKET_PORT ?? String(CONTROL_PORT + 1), 10);
+
+const socketClients = new Set<net.Socket>();
+const socketBuffers = new Map<net.Socket, string>();
 
 type ClientDescriptor = {
   id: string;
@@ -54,15 +59,28 @@ class Client extends RpcTarget {
   broadcast(message: unknown) {
     if (typeof message === "string") {
       console.log(`Incoming message! ${message}`);
+      broadcastSocketEvent('hub-message', { message, format: 'string' });
     } else if (typeof message === "object" && message !== null) {
       const msg = message as any;
       if (msg.type === "play-audio" && msg.filename) {
         // Don't play if this broadcast is from ourselves
         if (msg.from === descriptor.id) {
           console.log(`🎵 You initiated audio broadcast: ${msg.filename}`);
+          broadcastSocketEvent('broadcast-play', {
+            filename: msg.filename,
+            from: msg.from ?? descriptor.id,
+            timestamp: msg.timestamp ?? new Date().toISOString(),
+            self: true,
+          });
           return;
         }
         console.log(`🎵 Incoming audio broadcast: ${msg.filename} from ${msg.from || 'unknown'}`);
+        broadcastSocketEvent('broadcast-play', {
+          filename: msg.filename,
+          from: msg.from ?? null,
+          timestamp: msg.timestamp ?? new Date().toISOString(),
+          self: false,
+        });
         // Construct the audio URL based on our host
         const httpHost = host.replace(/^ws/, 'http');
         const audioUrl = `${httpHost}/audio/${msg.filename}`;
@@ -77,8 +95,10 @@ class Client extends RpcTarget {
       } catch (error) {
         console.log("Incoming message!", message);
       }
+      broadcastSocketEvent('hub-message', { message, format: 'object' });
     } else {
       console.log("Incoming message!", message);
+      broadcastSocketEvent('hub-message', { message, format: 'unknown' });
     }
   }
 }
@@ -87,6 +107,22 @@ type HubApi = {
   addClient(stub: Client, descriptor: ClientDescriptor): Promise<number>;
   broadcast(message: unknown): Promise<number>;
   runCommand(command: string, clientId?: string): Promise<unknown>;
+};
+
+type SocketRequest = {
+  id?: string;
+  type: string;
+  [key: string]: unknown;
+};
+
+type SocketResponse = {
+  id?: string;
+  type: string;
+  ok?: boolean;
+  error?: string;
+  data?: unknown;
+  event?: string;
+  payload?: unknown;
 };
 
 const api = newWebSocketRpcSession<HubApi>(host);
@@ -102,8 +138,26 @@ console.log(`Connected to: ${host}`);
 console.log(`Connected clients: ${total}`);
 console.log('Commands available: type "files" or "help"; "exit" to quit.');
 
-await startHttpInterface();
-console.log(`HTTP control interface listening at ${CONTROL_URL}`);
+const httpStarted = await startHttpInterface();
+if (httpStarted) {
+  console.log(`HTTP control interface listening at ${CONTROL_URL}`);
+} else {
+  console.warn(`HTTP control interface disabled; port ${CONTROL_PORT} already in use`);
+}
+
+let socketStarted = false;
+try {
+  socketStarted = await startSocketInterface();
+  if (socketStarted) {
+    console.log(`Socket interface listening at tcp://${CONTROL_HOST}:${CONTROL_SOCKET_PORT}`);
+  } else {
+    console.warn(`Socket control interface disabled; port ${CONTROL_SOCKET_PORT} already in use`);
+  }
+} catch (error) {
+  console.error(
+    `[SOCKET] failed to start interface: ${error instanceof Error ? error.message : String(error)}`,
+  );
+}
 
 const rl = createInterface({ input: stdin, output: stdout });
 
@@ -278,7 +332,7 @@ try {
   rl.close();
 }
 
-async function startHttpInterface() {
+async function startHttpInterface(): Promise<boolean> {
   const server = http.createServer(async (req, res) => {
     const headers = {
       "Content-Type": "application/json",
@@ -304,28 +358,18 @@ async function startHttpInterface() {
     try {
       if (req.method === "GET" && url.pathname === "/status") {
         console.log(`[HTTP] /status request ${new Date().toISOString()}`);
-        const whoami = await safeRunCommand("whoami");
-        const audioList = await safeRunCommand("audio list");
+        const payload = await getStatusPayload();
         res.writeHead(200, headers);
-        res.end(
-          JSON.stringify({
-            host,
-            descriptor,
-            connected: true,
-            timestamp: new Date().toISOString(),
-            whoami,
-            audioList,
-          }),
-        );
+        res.end(JSON.stringify(payload));
         return;
       }
 
       if (req.method === "GET" && url.pathname === "/files") {
         console.log(`[HTTP] /files request ${new Date().toISOString()}`);
-        const files = await fs.promises.readdir(".");
-        console.log(`[HTTP] /files response count=${files.length}`);
+        const payload = await listFilesPayload();
+        console.log(`[HTTP] /files response count=${payload.files.length}`);
         res.writeHead(200, headers);
-        res.end(JSON.stringify({ files }));
+        res.end(JSON.stringify(payload));
         return;
       }
 
@@ -337,10 +381,10 @@ async function startHttpInterface() {
           res.end(JSON.stringify({ error: "command is required" }));
           return;
         }
-        const result = await api.runCommand(body.command, descriptor.id);
+        const responsePayload = await commandPayload(body.command);
         console.log(`[HTTP] /command response ${new Date().toISOString()}`);
         res.writeHead(200, headers);
-        res.end(JSON.stringify({ result }));
+        res.end(JSON.stringify(responsePayload));
         return;
       }
 
@@ -352,11 +396,7 @@ async function startHttpInterface() {
           res.end(JSON.stringify({ error: "filename and base64 are required" }));
           return;
         }
-        const uploadResult = await uploadFileViaHttp(
-          body.filename,
-          body.base64,
-          body.contentType ?? guessContentType(body.filename),
-        );
+        const uploadResult = await uploadPayload(body.filename, body.base64, body.contentType);
         console.log(`[HTTP] /upload response ${new Date().toISOString()} filename=${body.filename}`);
         res.writeHead(200, headers);
         res.end(JSON.stringify(uploadResult));
@@ -371,16 +411,10 @@ async function startHttpInterface() {
           res.end(JSON.stringify({ error: "filename is required" }));
           return;
         }
-        const info = await getAudioInfo(body.filename);
-        if (!info || !info.exists) {
-          res.writeHead(404, headers);
-          res.end(JSON.stringify({ error: "Audio file not found" }));
-          return;
-        }
-        await playAudio(buildAudioUrl(body.filename), body.filename);
+        const payload = await playPayload(body.filename);
         console.log(`[HTTP] /play completed ${new Date().toISOString()} filename=${body.filename}`);
         res.writeHead(200, headers);
-        res.end(JSON.stringify({ played: body.filename, info }));
+        res.end(JSON.stringify(payload));
         return;
       }
 
@@ -392,23 +426,10 @@ async function startHttpInterface() {
           res.end(JSON.stringify({ error: "filename is required" }));
           return;
         }
-        const info = await getAudioInfo(body.filename);
-        if (!info || !info.exists) {
-          res.writeHead(404, headers);
-          res.end(JSON.stringify({ error: "Audio file not found" }));
-          return;
-        }
-        const message = {
-          type: "play-audio",
-          filename: body.filename,
-          from: descriptor.id,
-          timestamp: new Date().toISOString(),
-        };
-        await api.broadcast(message);
-        await playAudio(buildAudioUrl(body.filename), body.filename);
+        const payload = await broadcastPlayPayload(body.filename);
         console.log(`[HTTP] /broadcast-play completed ${new Date().toISOString()} filename=${body.filename}`);
         res.writeHead(200, headers);
-        res.end(JSON.stringify({ broadcast: true, filename: body.filename, info }));
+        res.end(JSON.stringify(payload));
         return;
       }
 
@@ -420,16 +441,10 @@ async function startHttpInterface() {
           res.end(JSON.stringify({ error: "message is required" }));
           return;
         }
-        const payload = {
-          type: "user-message",
-          from: descriptor.id,
-          message: body.message,
-          timestamp: new Date().toISOString(),
-        };
-        const recipients = await api.broadcast(payload);
-        console.log(`[HTTP] /broadcast response ${new Date().toISOString()} recipients=${recipients}`);
+        const payload = await broadcastPayload(body.message);
+        console.log(`[HTTP] /broadcast response ${new Date().toISOString()} recipients=${payload.recipients}`);
         res.writeHead(200, headers);
-        res.end(JSON.stringify({ recipients, payload }));
+        res.end(JSON.stringify(payload));
         return;
       }
 
@@ -442,11 +457,30 @@ async function startHttpInterface() {
     }
   });
 
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
+  return await new Promise<boolean>((resolve, reject) => {
+    const handleError = (error: NodeJS.ErrnoException) => {
+      if (error && error.code === "EADDRINUSE") {
+        console.warn(`[HTTP] control port ${CONTROL_HOST}:${CONTROL_PORT} already in use; skipping interface`);
+        server.off("error", handleError);
+        try {
+          server.close();
+        } catch (closeError) {
+          console.warn(`[HTTP] error closing unused server: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
+        }
+        resolve(false);
+        return;
+      }
+      server.off("error", handleError);
+      reject(error);
+    };
+
+    server.on("error", handleError);
     server.listen(CONTROL_PORT, CONTROL_HOST, () => {
-      server.off("error", reject);
-      resolve();
+      server.off("error", handleError);
+      server.on("error", (error) => {
+        console.error("[HTTP] server error", error instanceof Error ? error.message : String(error));
+      });
+      resolve(true);
     });
   });
 }
@@ -468,6 +502,76 @@ async function safeRunCommand(command: string) {
     return await api.runCommand(command, descriptor.id);
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function getStatusPayload() {
+  const whoami = await safeRunCommand("whoami");
+  const audioList = await safeRunCommand("audio list");
+  return {
+    host,
+    descriptor,
+    connected: true,
+    timestamp: new Date().toISOString(),
+    whoami,
+    audioList,
+  };
+}
+
+async function listFilesPayload() {
+  const files = await fs.promises.readdir(".");
+  return { files };
+}
+
+async function commandPayload(command: string) {
+  const result = await api.runCommand(command, descriptor.id);
+  return { result };
+}
+
+async function playPayload(filename: string) {
+  const info = await getAudioInfo(filename);
+  if (!info || !info.exists) {
+    throw new Error("Audio file not found");
+  }
+  await playAudio(buildAudioUrl(filename), filename);
+  return { played: filename, info };
+}
+
+async function broadcastPayload(message: string) {
+  const payload = {
+    type: "user-message",
+    from: descriptor.id,
+    message,
+    timestamp: new Date().toISOString(),
+  };
+  const recipients = await api.broadcast(payload);
+  return { recipients, payload };
+}
+
+async function broadcastPlayPayload(filename: string) {
+  const info = await getAudioInfo(filename);
+  if (!info || !info.exists) {
+    throw new Error("Audio file not found");
+  }
+  const message = {
+    type: "play-audio",
+    filename,
+    from: descriptor.id,
+    timestamp: new Date().toISOString(),
+  };
+  await api.broadcast(message);
+  await playAudio(buildAudioUrl(filename), filename);
+  return { broadcast: true, filename, info };
+}
+
+async function uploadPayload(filename: string, base64: string, contentType?: string) {
+  const normalizedContentType = contentType ?? guessContentType(filename);
+  try {
+    return await uploadFileViaHttp(filename, base64, normalizedContentType);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[HTTP] upload http fallback ${new Date().toISOString()} reason=${message}`);
+    return await uploadFileViaCommand(filename, base64, normalizedContentType);
   }
 }
 
@@ -529,5 +633,186 @@ async function uploadFileViaHttp(filename: string, base64: string, contentType: 
     req.on("error", reject);
     req.write(body);
     req.end();
+  });
+}
+
+async function uploadFileViaCommand(filename: string, base64: string, contentType: string) {
+  const sanitizedBase64 = typeof base64 === "string" ? base64.trim() : "";
+  if (!sanitizedBase64) {
+    throw new Error("base64 payload is empty");
+  }
+  const command = `audio upload ${filename} ${sanitizedBase64}`;
+  const result = await api.runCommand(command, descriptor.id);
+  if (!result || typeof result !== "object") {
+    throw new Error("Unexpected response from audio upload command");
+  }
+  const payload = result as { error?: string; size?: number; filename?: string };
+  if (payload.error) {
+    throw new Error(payload.error);
+  }
+  const decoded = Buffer.from(sanitizedBase64, "base64");
+  return {
+    filename: payload.filename ?? filename,
+    size: payload.size ?? decoded.length,
+    contentType,
+    via: "command",
+  };
+}
+
+function sendSocket(socket: net.Socket, message: SocketResponse) {
+  try {
+    socket.write(JSON.stringify(message) + "\n");
+  } catch (error) {
+    console.error("[SOCKET] failed to send message", error instanceof Error ? error.message : String(error));
+    socket.destroy();
+  }
+}
+
+function broadcastSocketEvent(event: string, payload: unknown) {
+  for (const socket of socketClients) {
+    sendSocket(socket, { type: "event", event, payload });
+  }
+}
+
+function removeSocket(socket: net.Socket) {
+  socketClients.delete(socket);
+  socketBuffers.delete(socket);
+}
+
+function handleSocketData(socket: net.Socket, chunk: string) {
+  const previous = socketBuffers.get(socket) ?? "";
+  const combined = previous + chunk;
+  const parts = combined.split("\n");
+  const remainder = parts.pop() ?? "";
+  socketBuffers.set(socket, remainder);
+  for (const part of parts) {
+    const line = part.trim();
+    if (!line) continue;
+    let request: SocketRequest;
+    try {
+      request = JSON.parse(line) as SocketRequest;
+    } catch (error) {
+      console.warn("[SOCKET] invalid JSON", error instanceof Error ? error.message : String(error));
+      sendSocket(socket, { type: "error", ok: false, error: "invalid json" });
+      continue;
+    }
+    void handleSocketRequest(socket, request);
+  }
+}
+
+async function handleSocketRequest(socket: net.Socket, request: SocketRequest) {
+  const { id, type } = request;
+  if (!id || typeof id !== "string") {
+    sendSocket(socket, { type: "error", ok: false, error: "request id is required" });
+    return;
+  }
+  try {
+    let data: unknown;
+    switch (type) {
+      case "status":
+        data = await getStatusPayload();
+        break;
+      case "files":
+        data = await listFilesPayload();
+        break;
+      case "command": {
+        const command = typeof request.command === "string" ? request.command : undefined;
+        if (!command) throw new Error("command is required");
+        data = await commandPayload(command);
+        break;
+      }
+      case "play": {
+        const filename = typeof request.filename === "string" ? request.filename : undefined;
+        if (!filename) throw new Error("filename is required");
+        data = await playPayload(filename);
+        break;
+      }
+      case "broadcast": {
+        const message = typeof request.message === "string" ? request.message : undefined;
+        if (!message) throw new Error("message is required");
+        data = await broadcastPayload(message);
+        break;
+      }
+      case "broadcast-play": {
+        const filename = typeof request.filename === "string" ? request.filename : undefined;
+        if (!filename) throw new Error("filename is required");
+        data = await broadcastPlayPayload(filename);
+        break;
+      }
+      case "upload": {
+        const filename = typeof request.filename === "string" ? request.filename : undefined;
+        const base64 = typeof request.base64 === "string" ? request.base64 : undefined;
+        const contentType = typeof request.contentType === "string" ? request.contentType : undefined;
+        if (!filename || !base64) throw new Error("filename and base64 are required");
+        data = await uploadPayload(filename, base64, contentType);
+        break;
+      }
+      default:
+        throw new Error(`Unknown request type: ${String(type)}`);
+    }
+    sendSocket(socket, { id, type, ok: true, data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    sendSocket(socket, { id, type, ok: false, error: message });
+  }
+}
+
+async function startSocketInterface(): Promise<boolean> {
+  return await new Promise<boolean>((resolve, reject) => {
+    const server = net.createServer((socket) => {
+      socket.setEncoding("utf8");
+      socketClients.add(socket);
+      socketBuffers.set(socket, "");
+      console.log(`[SOCKET] client connected from ${socket.remoteAddress}:${socket.remotePort}`);
+      sendSocket(socket, {
+        type: "event",
+        event: "hello",
+        payload: {
+          host,
+          descriptor,
+          connectedAt: new Date().toISOString(),
+        },
+      });
+      void getStatusPayload()
+        .then((status) => {
+          sendSocket(socket, { type: "event", event: "status", payload: status });
+        })
+        .catch((error) => {
+          sendSocket(socket, {
+            type: "event",
+            event: "error",
+            payload: { message: error instanceof Error ? error.message : String(error) },
+          });
+        });
+      socket.on("data", (chunk) => handleSocketData(socket, chunk));
+      socket.on("close", () => {
+        console.log("[SOCKET] client disconnected");
+        removeSocket(socket);
+      });
+      socket.on("error", (error) => {
+        console.error("[SOCKET] client error", error instanceof Error ? error.message : String(error));
+        removeSocket(socket);
+      });
+    });
+
+    const handleError = (error: NodeJS.ErrnoException) => {
+      if (error && error.code === "EADDRINUSE") {
+        console.warn(`[SOCKET] port ${CONTROL_HOST}:${CONTROL_SOCKET_PORT} already in use; skipping socket interface`);
+        server.close();
+        resolve(false);
+        return;
+      }
+      reject(error);
+    };
+
+    server.once("error", handleError);
+    server.listen(CONTROL_SOCKET_PORT, CONTROL_HOST, () => {
+      server.off("error", handleError);
+      server.on("error", (error) => {
+        console.error("[SOCKET] server error", error instanceof Error ? error.message : String(error));
+      });
+      console.log(`[SOCKET] listening on tcp://${CONTROL_HOST}:${CONTROL_SOCKET_PORT}`);
+      resolve(true);
+    });
   });
 }
