@@ -1,0 +1,6 @@
+{
+	"type": "module",
+	"dependencies": {
+		"capnweb": "^0.1.0"
+	}
+}

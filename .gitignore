@@ -1,0 +1,11 @@
+# Dependency directories
+node_modules/
+
+# Wrangler local state
+.wrangler/
+
+# Build artifacts
+dist/
+
+# Environment files
+.env

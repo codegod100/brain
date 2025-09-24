@@ -1,0 +1,6 @@
+{
+  // Cloudflare Worker configuration
+  "name": "brain-worker",
+  "main": "worker.ts",
+  "compatibility_date": "2024-09-27"
+}
