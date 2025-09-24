@@ -2,5 +2,19 @@
   // Cloudflare Worker configuration
   "name": "brain-worker",
   "main": "worker.ts",
-  "compatibility_date": "2024-09-27"
+  "compatibility_date": "2024-09-27",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RPC_HUB",
+        "class_name": "RpcHub"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_classes": ["RpcHub"]
+    }
+  ]
 }

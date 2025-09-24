@@ -6,6 +6,7 @@ class Client extends RpcTarget {
 }
 
 let api = newWebSocketRpcSession("ws://localhost:8787");
-await api.addClient(new Client())
+const client = new Client()
+await api.addClient(client)
 const res = await api.broadcast("yolo")
 // console.log(res)
