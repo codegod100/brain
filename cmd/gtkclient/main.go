@@ -36,6 +36,7 @@ type app struct {
 	uploadFilePath string
 
 	textBuffer *gtk.TextBuffer
+	textView   *gtk.TextView
 
 	audioFlow        *gtk.FlowBox
 	audioButtons     []*gtk.Button
@@ -243,6 +244,7 @@ func (a *app) buildUI() error {
 	textView.SetEditable(false)
 	textView.SetWrapMode(gtk.WRAP_WORD_CHAR)
 	scroll.Add(textView)
+	a.textView = textView
 	a.textBuffer, _ = textView.GetBuffer()
 
 	win.ShowAll()
@@ -263,6 +265,13 @@ func (a *app) logf(format string, args ...interface{}) {
 			next := start
 			next.ForwardLine()
 			a.textBuffer.Delete(start, next)
+		}
+		if a.textView != nil {
+			end := a.textBuffer.GetEndIter()
+			a.textBuffer.PlaceCursor(end)
+			if mark := a.textBuffer.GetInsert(); mark != nil {
+				a.textView.ScrollMarkOnscreen(mark)
+			}
 		}
 		return false
 	})
