@@ -17,6 +17,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 use url::Url;
 
 const DEFAULT_CONTROL_URL: &str = "http://127.0.0.1:4455";
@@ -88,6 +89,7 @@ enum AppMsg {
     UploadResult(Result<UploadResponse, String>),
     UploadFileChosen(Option<PathBuf>),
     Log(String),
+    RetryConnect,
 }
 
 struct AppModel {
@@ -100,6 +102,8 @@ struct AppModel {
     log_limit: usize,
     upload_path: Option<PathBuf>,
     input_sender: Sender<AppMsg>,
+    connecting: bool,
+    reconnect_pending: bool,
 }
 
 struct AppWidgets {
@@ -380,6 +384,8 @@ impl SimpleComponent for AppModel {
             log_limit: LOG_LIMIT,
             upload_path: None,
             input_sender: sender.input_sender().clone(),
+            connecting: false,
+            reconnect_pending: false,
         };
 
         sender.input(AppMsg::Initialize);
@@ -391,16 +397,27 @@ impl SimpleComponent for AppModel {
         match msg {
             AppMsg::Initialize => {
                 self.log("Control URL: ".to_string() + self.control_url.as_str());
+                self.status_label = "Status: connecting...".into();
                 self.start_connect();
             }
-            AppMsg::SocketConnected(result) => match result {
-                Ok((client, address)) => {
-                    self.log(format!("socket connected: {address}"));
-                    self.socket = Some(client);
-                    self.schedule_fetch_status();
+            AppMsg::SocketConnected(result) => {
+                self.connecting = false;
+                self.reconnect_pending = false;
+                match result {
+                    Ok((client, address)) => {
+                        self.log(format!("socket connected: {address}"));
+                        self.socket = Some(client);
+                        self.status_label = "Status: connected".into();
+                        self.schedule_fetch_status();
+                    }
+                    Err(err) => {
+                        self.socket = None;
+                        self.log(format!("socket connect error: {err}"));
+                        self.status_label = "Status: disconnected".into();
+                        self.schedule_reconnect();
+                    }
                 }
-                Err(err) => self.log(format!("socket connect error: {err}")),
-            },
+            }
             AppMsg::SocketEvent(message) => self.handle_socket_event(message),
             AppMsg::FetchStatus => self.schedule_fetch_status(),
             AppMsg::StatusFetched(result) => match result {
@@ -533,6 +550,14 @@ impl SimpleComponent for AppModel {
                 }
             }
             AppMsg::Log(text) => self.log(text),
+            AppMsg::RetryConnect => {
+                self.reconnect_pending = false;
+                if self.socket.is_some() {
+                    self.status_label = "Status: connected".into();
+                    return;
+                }
+                self.start_connect();
+            }
         }
     }
 
@@ -593,7 +618,15 @@ impl Drop for AppModel {
 }
 
 impl AppModel {
-    fn start_connect(&self) {
+    fn start_connect(&mut self) {
+        if self.socket.is_some() {
+            return;
+        }
+        if self.connecting {
+            return;
+        }
+        self.connecting = true;
+        self.status_label = "Status: connecting...".into();
         let url = self.control_url.clone();
         let sender = self.input_sender.clone();
         thread::spawn(move || {
@@ -604,6 +637,9 @@ impl AppModel {
                     return;
                 }
             };
+            sender
+                .send(AppMsg::Log(format!("attempting socket connect: {address}")))
+                .ok();
             let (event_tx, event_rx) = mpsc::channel();
             match SocketClient::connect(&address, event_tx) {
                 Ok(client) => {
@@ -631,6 +667,7 @@ impl AppModel {
     fn schedule_fetch_status(&mut self) {
         let Some(socket) = self.socket.clone() else {
             self.log("socket not connected");
+            self.schedule_reconnect();
             return;
         };
         let sender = self.input_sender.clone();
@@ -643,6 +680,7 @@ impl AppModel {
     fn schedule_fetch_files(&mut self) {
         let Some(socket) = self.socket.clone() else {
             self.log("socket not connected");
+            self.schedule_reconnect();
             return;
         };
         let sender = self.input_sender.clone();
@@ -655,6 +693,7 @@ impl AppModel {
     fn schedule_command(&mut self, command: String) {
         let Some(socket) = self.socket.clone() else {
             self.log("socket not connected");
+            self.schedule_reconnect();
             return;
         };
         let sender = self.input_sender.clone();
@@ -678,6 +717,7 @@ impl AppModel {
     ) {
         let Some(socket) = self.socket.clone() else {
             self.log("socket not connected");
+            self.schedule_reconnect();
             return;
         };
         let sender = self.input_sender.clone();
@@ -702,6 +742,7 @@ impl AppModel {
     fn schedule_upload(&mut self, path: PathBuf, remote: String) {
         let Some(socket) = self.socket.clone() else {
             self.log("socket not connected");
+            self.schedule_reconnect();
             return;
         };
         let sender = self.input_sender.clone();
@@ -859,6 +900,9 @@ impl AppModel {
                 } else {
                     self.log("socket error event");
                 }
+                if self.socket.is_none() {
+                    self.schedule_reconnect();
+                }
             }
             "disconnect" => {
                 if let Some(err) = message.error {
@@ -867,11 +911,25 @@ impl AppModel {
                     self.log("socket disconnected");
                 }
                 self.socket = None;
+                self.schedule_reconnect();
             }
             other => {
                 self.log(format!("socket event {other}"));
             }
         }
+    }
+
+    fn schedule_reconnect(&mut self) {
+        if self.connecting || self.reconnect_pending {
+            return;
+        }
+        self.reconnect_pending = true;
+        self.status_label = "Status: reconnecting...".into();
+        let sender = self.input_sender.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(2));
+            sender.send(AppMsg::RetryConnect).ok();
+        });
     }
 
     fn log(&mut self, text: impl Into<String>) {
@@ -1076,7 +1134,7 @@ fn compute_socket_address(control_url: &Url) -> Result<String, String> {
         return Ok(join_host_port(host, port));
     }
     let port = control_url.port().unwrap_or(DEFAULT_CONTROL_PORT);
-    Ok(join_host_port(host, port + 1))
+    Ok(join_host_port(host, port))
 }
 
 fn join_host_port(host: &str, port: u16) -> String {

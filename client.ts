@@ -43,8 +43,7 @@ function parseArgs() {
 const { host } = parseArgs();
 const CONTROL_HOST = process.env.CLIENT_HTTP_HOST ?? "127.0.0.1";
 const CONTROL_PORT = Number.parseInt(process.env.CLIENT_HTTP_PORT ?? "4455", 10);
-const CONTROL_URL = `http://${CONTROL_HOST}:${CONTROL_PORT}`;
-const CONTROL_SOCKET_PORT = Number.parseInt(process.env.CLIENT_SOCKET_PORT ?? String(CONTROL_PORT + 1), 10);
+const CONTROL_SOCKET_PORT = Number.parseInt(process.env.CLIENT_SOCKET_PORT ?? String(CONTROL_PORT), 10);
 
 const socketClients = new Set<net.Socket>();
 const socketBuffers = new Map<net.Socket, string>();
@@ -138,20 +137,13 @@ console.log(`Connected to: ${host}`);
 console.log(`Connected clients: ${total}`);
 console.log('Commands available: type "files" or "help"; "exit" to quit.');
 
-const httpStarted = await startHttpInterface();
-if (httpStarted) {
-  console.log(`HTTP control interface listening at ${CONTROL_URL}`);
-} else {
-  console.warn(`HTTP control interface disabled; port ${CONTROL_PORT} already in use`);
-}
-
 let socketStarted = false;
 try {
   socketStarted = await startSocketInterface();
   if (socketStarted) {
-    console.log(`Socket interface listening at tcp://${CONTROL_HOST}:${CONTROL_SOCKET_PORT}`);
+    console.log(`Control interface listening at tcp://${CONTROL_HOST}:${CONTROL_SOCKET_PORT}`);
   } else {
-    console.warn(`Socket control interface disabled; port ${CONTROL_SOCKET_PORT} already in use`);
+    console.warn(`Control interface disabled; port ${CONTROL_SOCKET_PORT} already in use`);
   }
 } catch (error) {
   console.error(
@@ -330,171 +322,6 @@ try {
   }
 } finally {
   rl.close();
-}
-
-async function startHttpInterface(): Promise<boolean> {
-  const server = http.createServer(async (req, res) => {
-    const headers = {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "content-type",
-      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    } as const;
-
-    if (req.method === "OPTIONS") {
-      res.writeHead(204, headers);
-      res.end();
-      return;
-    }
-
-    if (!req.url) {
-      res.writeHead(404, headers);
-      res.end(JSON.stringify({ error: "Missing URL" }));
-      return;
-    }
-
-    const url = new URL(req.url, CONTROL_URL);
-
-    try {
-      if (req.method === "GET" && url.pathname === "/status") {
-        console.log(`[HTTP] /status request ${new Date().toISOString()}`);
-        const payload = await getStatusPayload();
-        res.writeHead(200, headers);
-        res.end(JSON.stringify(payload));
-        return;
-      }
-
-      if (req.method === "GET" && url.pathname === "/files") {
-        console.log(`[HTTP] /files request ${new Date().toISOString()}`);
-        const payload = await listFilesPayload();
-        console.log(`[HTTP] /files response count=${payload.files.length}`);
-        res.writeHead(200, headers);
-        res.end(JSON.stringify(payload));
-        return;
-      }
-
-      if (req.method === "POST" && url.pathname === "/command") {
-        const body = await readJsonBody<{ command?: string }>(req);
-        console.log(`[HTTP] /command request ${new Date().toISOString()} command=${body.command}`);
-        if (!body.command || typeof body.command !== "string") {
-          res.writeHead(400, headers);
-          res.end(JSON.stringify({ error: "command is required" }));
-          return;
-        }
-        const responsePayload = await commandPayload(body.command);
-        console.log(`[HTTP] /command response ${new Date().toISOString()}`);
-        res.writeHead(200, headers);
-        res.end(JSON.stringify(responsePayload));
-        return;
-      }
-
-      if (req.method === "POST" && url.pathname === "/upload") {
-        const body = await readJsonBody<{ filename?: string; base64?: string; contentType?: string }>(req);
-        console.log(`[HTTP] /upload request ${new Date().toISOString()} filename=${body.filename}`);
-        if (!body.filename || !body.base64) {
-          res.writeHead(400, headers);
-          res.end(JSON.stringify({ error: "filename and base64 are required" }));
-          return;
-        }
-        const uploadResult = await uploadPayload(body.filename, body.base64, body.contentType);
-        console.log(`[HTTP] /upload response ${new Date().toISOString()} filename=${body.filename}`);
-        res.writeHead(200, headers);
-        res.end(JSON.stringify(uploadResult));
-        return;
-      }
-
-      if (req.method === "POST" && url.pathname === "/play") {
-        const body = await readJsonBody<{ filename?: string }>(req);
-        console.log(`[HTTP] /play request ${new Date().toISOString()} filename=${body.filename}`);
-        if (!body.filename) {
-          res.writeHead(400, headers);
-          res.end(JSON.stringify({ error: "filename is required" }));
-          return;
-        }
-        const payload = await playPayload(body.filename);
-        console.log(`[HTTP] /play completed ${new Date().toISOString()} filename=${body.filename}`);
-        res.writeHead(200, headers);
-        res.end(JSON.stringify(payload));
-        return;
-      }
-
-      if (req.method === "POST" && url.pathname === "/broadcast-play") {
-        const body = await readJsonBody<{ filename?: string }>(req);
-        console.log(`[HTTP] /broadcast-play request ${new Date().toISOString()} filename=${body.filename}`);
-        if (!body.filename) {
-          res.writeHead(400, headers);
-          res.end(JSON.stringify({ error: "filename is required" }));
-          return;
-        }
-        const payload = await broadcastPlayPayload(body.filename);
-        console.log(`[HTTP] /broadcast-play completed ${new Date().toISOString()} filename=${body.filename}`);
-        res.writeHead(200, headers);
-        res.end(JSON.stringify(payload));
-        return;
-      }
-
-      if (req.method === "POST" && url.pathname === "/broadcast") {
-        const body = await readJsonBody<{ message?: string }>(req);
-        console.log(`[HTTP] /broadcast request ${new Date().toISOString()} message=${body.message}`);
-        if (!body.message) {
-          res.writeHead(400, headers);
-          res.end(JSON.stringify({ error: "message is required" }));
-          return;
-        }
-        const payload = await broadcastPayload(body.message);
-        console.log(`[HTTP] /broadcast response ${new Date().toISOString()} recipients=${payload.recipients}`);
-        res.writeHead(200, headers);
-        res.end(JSON.stringify(payload));
-        return;
-      }
-
-      res.writeHead(404, headers);
-      res.end(JSON.stringify({ error: "Not found" }));
-    } catch (error) {
-      console.error("HTTP interface error", error);
-      res.writeHead(500, headers);
-      res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
-    }
-  });
-
-  return await new Promise<boolean>((resolve, reject) => {
-    const handleError = (error: NodeJS.ErrnoException) => {
-      if (error && error.code === "EADDRINUSE") {
-        console.warn(`[HTTP] control port ${CONTROL_HOST}:${CONTROL_PORT} already in use; skipping interface`);
-        server.off("error", handleError);
-        try {
-          server.close();
-        } catch (closeError) {
-          console.warn(`[HTTP] error closing unused server: ${closeError instanceof Error ? closeError.message : String(closeError)}`);
-        }
-        resolve(false);
-        return;
-      }
-      server.off("error", handleError);
-      reject(error);
-    };
-
-    server.on("error", handleError);
-    server.listen(CONTROL_PORT, CONTROL_HOST, () => {
-      server.off("error", handleError);
-      server.on("error", (error) => {
-        console.error("[HTTP] server error", error instanceof Error ? error.message : String(error));
-      });
-      resolve(true);
-    });
-  });
-}
-
-async function readJsonBody<T>(req: http.IncomingMessage): Promise<T> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-  }
-  if (chunks.length === 0) {
-    return {} as T;
-  }
-  const raw = Buffer.concat(chunks).toString("utf8");
-  return JSON.parse(raw) as T;
 }
 
 async function safeRunCommand(command: string) {
