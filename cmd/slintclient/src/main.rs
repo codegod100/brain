@@ -5,7 +5,7 @@ use crate::socket_client::{SharedSocketClient, SocketClient, SocketMessage};
 use base64::engine::general_purpose::STANDARD as Base64Engine;
 use base64::Engine;
 use chrono::Local;
-use slint::{SharedString, VecModel};
+use slint::{ModelRc, SharedString, VecModel};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -120,7 +120,7 @@ impl AppState {
         slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
                 let model = VecModel::from_slice(&snapshot);
-                ui.set_log_entries(model.into());
+                ui.set_log_entries(ModelRc::new(model));
             }
         })
         .ok();
@@ -462,36 +462,46 @@ impl AppState {
     }
 
     fn handle_status_update(self: &Arc<Self>, update: StatusUpdate) {
-        let host = update
-            .status
-            .host
-            .clone()
-            .unwrap_or_else(|| "unknown".into());
-        self.set_status(format!(
-            "Status: {} (connected={})",
-            host, update.status.connected
-        ));
+        let StatusUpdate {
+            status,
+            files,
+            audio_error,
+        } = update;
+        self.update_audio_files(files.clone());
+
+        let host = status.host.clone().unwrap_or_else(|| "unknown".into());
+        self.set_status(format!("Status: {} (connected={})", host, status.connected));
         self.log(format!(
             "status ok: host={} connected={}",
-            host, update.status.connected
+            host, status.connected
         ));
-        match update.audio_error {
+        match audio_error {
             Some(err) => self.log(format!("audio list error: {err}")),
-            None if update.files.is_empty() => self.log("audio list empty"),
+            None if files.is_empty() => self.log("audio list empty"),
             None => {
-                let preview: Vec<_> = update
-                    .files
-                    .iter()
-                    .take(6)
-                    .map(|f| f.name.as_str())
-                    .collect();
+                let preview: Vec<_> = files.iter().take(6).map(|f| f.name.as_str()).collect();
                 self.log(format!(
                     "audio list ({}): {}",
-                    update.files.len(),
+                    files.len(),
                     preview.join(", ")
                 ));
             }
         }
+    }
+
+    fn update_audio_files(self: &Arc<Self>, files: Vec<AudioFile>) {
+        let names: Vec<SharedString> = files
+            .iter()
+            .map(|f| SharedString::from(f.name.clone()))
+            .collect();
+        let weak = self.ui.clone();
+        slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                let model = VecModel::from_slice(&names);
+                ui.set_audio_files(ModelRc::new(model));
+            }
+        })
+        .ok();
     }
 
     fn handle_socket_event(self: &Arc<Self>, message: SocketMessage) {
@@ -765,7 +775,8 @@ fn parse_control_url() -> Url {
 fn main() {
     let control_url = parse_control_url();
     let app = AppWindow::new().expect("failed to construct UI");
-    app.set_log_entries(VecModel::from_slice(&[]).into());
+    app.set_log_entries(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
+    app.set_audio_files(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
     app.set_command_text("".into());
     app.set_play_text("".into());
     app.set_broadcast_text("".into());
@@ -820,6 +831,13 @@ fn main() {
         let state = Arc::clone(&state);
         app.on_broadcast_play(move |filename| {
             state.schedule_play(filename.to_string(), true);
+        });
+    }
+
+    {
+        let state = Arc::clone(&state);
+        app.on_audio_file_clicked(move |name| {
+            state.schedule_play(name.to_string(), true);
         });
     }
 
