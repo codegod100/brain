@@ -23,5 +23,5 @@
             "label": "desktop"
         }
     },
-    "postCreateCommand": "apt update && apt install -y libxkbcommon-x11-0 && npm install -g pnpm && pnpm add -g tsx"
+    "postCreateCommand": "apt update && apt install -y libxkbcommon-x11-0 && npm install -g pnpm && pnpm add -g tsx && apt install -y fish && usermod -s /usr/bin/fish vscode"
 }

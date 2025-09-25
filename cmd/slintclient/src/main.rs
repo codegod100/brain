@@ -5,8 +5,8 @@ use crate::socket_client::{SharedSocketClient, SocketClient, SocketMessage};
 use base64::engine::general_purpose::STANDARD as Base64Engine;
 use base64::Engine;
 use chrono::Local;
-use slint::{ModelRc, SharedString, VecModel};
-use std::collections::VecDeque;
+use slint::{Model, ModelRc, SharedString, VecModel};
+use std::rc::Rc;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -84,7 +84,7 @@ struct BroadcastPlayEvent {
 struct AppState {
     control_url: Url,
     socket: Mutex<Option<SharedSocketClient>>,
-    logs: Mutex<VecDeque<SharedString>>,
+    log_tx: std::sync::mpsc::Sender<SharedString>,
     upload_path: Mutex<Option<PathBuf>>,
     connecting: AtomicBool,
     reconnect_pending: AtomicBool,
@@ -92,11 +92,11 @@ struct AppState {
 }
 
 impl AppState {
-    fn new(control_url: Url, ui: slint::Weak<AppWindow>) -> Arc<Self> {
+    fn new(control_url: Url, ui: slint::Weak<AppWindow>, log_tx: std::sync::mpsc::Sender<SharedString>) -> Arc<Self> {
         Arc::new(Self {
             control_url,
             socket: Mutex::new(None),
-            logs: Mutex::new(VecDeque::new()),
+            log_tx,
             upload_path: Mutex::new(None),
             connecting: AtomicBool::new(false),
             reconnect_pending: AtomicBool::new(false),
@@ -108,22 +108,7 @@ impl AppState {
         let message = text.into();
         let timestamp = Local::now().format("%H:%M:%S");
         let entry = SharedString::from(format!("[{timestamp}] {message}"));
-        let snapshot = {
-            let mut logs = self.logs.lock().unwrap();
-            if logs.len() >= LOG_LIMIT {
-                logs.pop_front();
-            }
-            logs.push_back(entry);
-            logs.iter().cloned().collect::<Vec<_>>()
-        };
-        let weak = self.ui.clone();
-        slint::invoke_from_event_loop(move || {
-            if let Some(ui) = weak.upgrade() {
-                let model = VecModel::from_slice(&snapshot);
-                ui.set_log_entries(ModelRc::new(model));
-            }
-        })
-        .ok();
+        let _ = self.log_tx.send(entry);
     }
 
     fn set_status(self: &Arc<Self>, status: impl Into<String>) {
@@ -775,14 +760,59 @@ fn parse_control_url() -> Url {
 fn main() {
     let control_url = parse_control_url();
     let app = AppWindow::new().expect("failed to construct UI");
-    app.set_log_entries(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
+
+    // Set up a persistent log model to avoid re-binding the property
+    let log_model: Rc<VecModel<SharedString>> = Rc::new(VecModel::from(Vec::<SharedString>::new()));
+    app.set_log_entries(ModelRc::new(log_model.clone()));
     app.set_audio_files(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
     app.set_command_text("".into());
     app.set_play_text("".into());
     app.set_broadcast_text("".into());
     app.set_upload_name_text("".into());
 
-    let state = AppState::new(control_url, app.as_weak());
+    // Channel for log entries; updates to the UI model are batched on the UI thread
+    let (log_tx, log_rx) = std::sync::mpsc::channel::<SharedString>();
+
+    // Spawn a helper thread that applies log updates on the Slint event loop,
+    // mutating the persistent VecModel instead of re-binding the model each time.
+    {
+        let ui_weak_outer = app.as_weak();
+        std::thread::spawn(move || {
+            while let Ok(entry) = log_rx.recv() {
+                let ui_weak = ui_weak_outer.clone();
+                slint::invoke_from_event_loop(move || {
+                    // Only update if UI still alive
+                    if let Some(ui) = ui_weak.upgrade() {
+                        let model = ui.get_log_entries();
+                        // Downcast to VecModel to mutate in place
+                        if let Some(vec_model) = model.as_any().downcast_ref::<VecModel<SharedString>>() {
+                            while vec_model.row_count() >= LOG_LIMIT {
+                                vec_model.remove(0);
+                            }
+                            vec_model.push(entry);
+                            // Trigger UI to apply scroll formula
+                            let rev = ui.get_log_force_rev();
+                            ui.set_log_force_rev(rev + 1);
+                        } else {
+                            // Fallback: re-set the model (should be rare)
+                            let mut current: Vec<SharedString> = Vec::new();
+                            for i in 0..model.row_count() {
+                                if let Some(v) = model.row_data(i) { current.push(v); }
+                            }
+                            if current.len() >= LOG_LIMIT { current.remove(0); }
+                            current.push(entry);
+                            ui.set_log_entries(ModelRc::new(VecModel::from(current)));
+                            let rev = ui.get_log_force_rev();
+                            ui.set_log_force_rev(rev + 1);
+                        }
+                    }
+                })
+                .ok();
+            }
+        });
+    }
+
+    let state = AppState::new(control_url, app.as_weak(), log_tx);
 
     {
         let state = Arc::clone(&state);

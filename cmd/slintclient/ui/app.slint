@@ -12,6 +12,14 @@ export component AppWindow inherits Window {
     in-out property <string> play_text;
     in-out property <string> broadcast_text;
     in-out property <string> upload_name_text;
+    in-out property <int> log_force_rev: 0;
+
+    // Apply requested scroll formula whenever log_force_rev changes
+    changed log_force_rev => {
+        // Scroll to bottom: viewport-y = min(0px, -viewport-height + visible-height)
+        log_view.viewport-y = min(0px, -log_view.viewport-height + log_view.height);
+    }
+    
 
     callback refresh_status();
     callback fetch_files();
@@ -101,14 +109,15 @@ export component AppWindow inherits Window {
         }
 
         Text { text: "Event Log"; font-weight: 600; }
-        ScrollView {
+        log_view := ScrollView {
             horizontal-stretch: 1;
             vertical-stretch: 1;
-
             VerticalLayout {
                 spacing: 2px;
                 for line[i] in root.log_entries: Text { text: line; }
             }
         }
     }
+
+    
 }
