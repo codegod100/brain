@@ -11,3 +11,4 @@ url = "2.5"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 thiserror = "1.0"
+relm4-icons = "0.7.1"

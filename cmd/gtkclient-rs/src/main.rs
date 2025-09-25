@@ -9,6 +9,7 @@ use relm4::gtk;
 use relm4::gtk::prelude::*;
 use relm4::prelude::*;
 use relm4::Sender;
+use relm4_icons::icon_names;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{Map as JsonMap, Value};
@@ -23,6 +24,30 @@ use url::Url;
 const DEFAULT_CONTROL_URL: &str = "http://127.0.0.1:4455";
 const DEFAULT_CONTROL_PORT: u16 = 4455;
 const LOG_LIMIT: usize = 500;
+
+fn button_with_icon(label: &str, icon_name: &str) -> gtk::Button {
+    let button = gtk::Button::builder().build();
+    button.set_label(label);
+    button.set_tooltip_text(Some(label));
+
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(6)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .build();
+
+    let image = gtk::Image::from_icon_name(icon_name);
+    image.set_pixel_size(20);
+    content.append(&image);
+
+    let label_widget = gtk::Label::new(Some(label));
+    label_widget.set_xalign(0.0);
+    content.append(&label_widget);
+
+    button.set_child(Some(&content));
+    button
+}
 
 #[derive(Debug, Clone)]
 struct AudioFile {
@@ -158,7 +183,7 @@ impl SimpleComponent for AppModel {
             .label("Status: pending...")
             .build();
         status_row.append(&status_label);
-        let refresh_button = gtk::Button::with_label("Refresh Status");
+        let refresh_button = button_with_icon("Refresh Status", icon_names::UPDATE);
         {
             let sender = sender.clone();
             refresh_button.connect_clicked(move |_| {
@@ -169,7 +194,7 @@ impl SimpleComponent for AppModel {
         main_box.append(&status_row);
 
         // List files button
-        let list_files_button = gtk::Button::with_label("List Files");
+        let list_files_button = button_with_icon("List Files", icon_names::FOLDER_OPEN_REGULAR);
         {
             let sender = sender.clone();
             list_files_button.connect_clicked(move |_| {
@@ -179,7 +204,7 @@ impl SimpleComponent for AppModel {
         main_box.append(&list_files_button);
 
         // Show peers button
-        let peers_button = gtk::Button::with_label("Show Peers");
+        let peers_button = button_with_icon("Show Peers", icon_names::PEOPLE);
         {
             let sender = sender.clone();
             peers_button.connect_clicked(move |_| {
@@ -207,7 +232,7 @@ impl SimpleComponent for AppModel {
             });
         }
         command_row.append(&command_entry);
-        let command_button = gtk::Button::with_label("Send");
+        let command_button = button_with_icon("Send", icon_names::SEND);
         {
             let sender = sender.clone();
             let entry = command_entry.clone();
@@ -227,7 +252,7 @@ impl SimpleComponent for AppModel {
         play_row.append(&play_label);
         let play_entry = gtk::Entry::builder().hexpand(true).build();
         play_row.append(&play_entry);
-        let play_button = gtk::Button::with_label("Play");
+        let play_button = button_with_icon("Play", icon_names::PLAY);
         {
             let sender = sender.clone();
             let entry = play_entry.clone();
@@ -247,7 +272,7 @@ impl SimpleComponent for AppModel {
         broadcast_row.append(&broadcast_label);
         let broadcast_entry = gtk::Entry::builder().hexpand(true).build();
         broadcast_row.append(&broadcast_entry);
-        let broadcast_button = gtk::Button::with_label("Broadcast");
+        let broadcast_button = button_with_icon("Broadcast", icon_names::SHARE);
         {
             let sender = sender.clone();
             let entry = broadcast_entry.clone();
@@ -256,7 +281,7 @@ impl SimpleComponent for AppModel {
             });
         }
         broadcast_row.append(&broadcast_button);
-        let broadcast_play_button = gtk::Button::with_label("Broadcast Play");
+        let broadcast_play_button = button_with_icon("Broadcast Play", icon_names::PLAYLIST_REPEAT);
         {
             let sender = sender.clone();
             let entry = play_entry.clone();
@@ -272,7 +297,7 @@ impl SimpleComponent for AppModel {
             .orientation(gtk::Orientation::Horizontal)
             .spacing(6)
             .build();
-        let choose_button = gtk::Button::with_label("Choose File");
+        let choose_button = button_with_icon("Choose File", icon_names::FOLDER_OPEN_REGULAR);
         upload_row.append(&choose_button);
         let remote_label = gtk::Label::new(Some("Remote name:"));
         upload_row.append(&remote_label);
@@ -281,7 +306,7 @@ impl SimpleComponent for AppModel {
             .placeholder_text("leave blank to use file name")
             .build();
         upload_row.append(&upload_name_entry);
-        let upload_button = gtk::Button::with_label("Upload");
+        let upload_button = button_with_icon("Upload", icon_names::ARROW_UPLOAD_REGULAR);
         {
             let sender = sender.clone();
             let entry = upload_name_entry.clone();
@@ -1167,6 +1192,7 @@ fn parse_control_url() -> Url {
 
 fn main() {
     let control_url = parse_control_url();
+    relm4_icons::initialize_icons();
     let app = RelmApp::new("com.example.brainhub");
     app.run::<AppModel>(control_url);
 }
