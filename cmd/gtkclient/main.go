@@ -197,7 +197,7 @@ func (a *app) buildUI() error {
 	uploadBox, _ := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 6)
 	vbox.PackStart(uploadBox, false, false, 0)
 	chooseBtn, _ := gtk.ButtonNewWithLabel("Choose File")
-	chooseBtn.Connect("clicked", func() { go a.chooseUploadFile() })
+	chooseBtn.Connect("clicked", func() { a.chooseUploadFile() })
 	uploadBox.PackStart(chooseBtn, false, false, 0)
 	remoteLabel, _ := gtk.LabelNew("Remote name:")
 	uploadBox.PackStart(remoteLabel, false, false, 0)
