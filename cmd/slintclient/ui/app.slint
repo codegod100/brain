@@ -1,0 +1,99 @@
+import { Button, LineEdit, ScrollView, ListView } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    width: 900px;
+    height: 600px;
+    title: "Brain Hub (Slint)";
+
+    in property <string> status_text: "Status: pending...";
+    in-out property <[string]> log_entries;
+    in-out property <string> command_text;
+    in-out property <string> play_text;
+    in-out property <string> broadcast_text;
+    in-out property <string> upload_name_text;
+
+    callback refresh_status();
+    callback fetch_files();
+    callback show_peers();
+    callback send_command(string);
+    callback play_audio(string);
+    callback broadcast_message(string);
+    callback broadcast_play(string);
+    callback choose_file();
+    callback upload_file(string);
+
+    VerticalLayout {
+        spacing: 8px;
+        padding: 12px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: root.status_text; horizontal-stretch: 1; }
+            Button { text: "Refresh Status"; clicked => { root.refresh_status(); } }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Button { text: "List Files"; clicked => { root.fetch_files(); } }
+            Button { text: "Show Peers"; clicked => { root.show_peers(); } }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "Command:"; }
+            LineEdit { text <=> root.command_text; horizontal-stretch: 1; }
+            Button {
+                text: "Send";
+                clicked => { root.send_command(root.command_text); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "Play filename:"; }
+            LineEdit { text <=> root.play_text; horizontal-stretch: 1; }
+            Button {
+                text: "Play";
+                clicked => { root.play_audio(root.play_text); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "Broadcast message:"; }
+            LineEdit { text <=> root.broadcast_text; horizontal-stretch: 1; }
+            Button {
+                text: "Broadcast";
+                clicked => { root.broadcast_message(root.broadcast_text); }
+            }
+            Button {
+                text: "Broadcast Play";
+                clicked => { root.broadcast_play(root.play_text); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Button { text: "Choose File"; clicked => { root.choose_file(); } }
+            Text { text: "Remote name:"; }
+            LineEdit { text <=> root.upload_name_text; horizontal-stretch: 1; }
+            Button {
+                text: "Upload";
+                clicked => { root.upload_file(root.upload_name_text); }
+            }
+        }
+
+        ScrollView {
+            horizontal-stretch: 1;
+            vertical-stretch: 1;
+
+            ListView {
+                width: 100%;
+                height: 100%;
+                for entry[i] in root.log_entries: Text {
+                    text: entry;
+                }
+            }
+        }
+    }
+}
