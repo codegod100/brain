@@ -24,6 +24,10 @@ const audioListEl = byId<HTMLUListElement>('audioList');
 const runBenchmarkBtn = byId<HTMLButtonElement>('runBenchmark');
 const benchmarkSummaryEl = byId<HTMLDivElement>('benchmarkSummary');
 const benchmarkTableBody = byId<HTMLTableSectionElement>('benchmarkTableBody');
+const audioFileInput = byId<HTMLInputElement>('audioFileInput');
+const audioFileNameInput = byId<HTMLInputElement>('audioFileName');
+const uploadAudioBtn = byId<HTMLButtonElement>('uploadAudio');
+const uploadStatusEl = byId<HTMLDivElement>('uploadStatus');
 
 type BenchmarkResult = {
   clientId: string;
@@ -77,6 +81,7 @@ function determineHost(): string {
 hostEl.value = determineHost();
 
 renderBenchmarkSummary(null);
+setUploadStatus('Select an audio file to upload.', 'muted');
 
 // Wire UI bindings
 attachUiBindings({
@@ -174,6 +179,44 @@ broadcastPlayBtn.addEventListener('click', () => {
 clearLogsBtn.addEventListener('click', () => {
   logsEl.textContent = '';
   shouldAutoScroll = true;
+});
+
+audioFileInput.addEventListener('change', () => {
+  const file = audioFileInput.files?.[0] ?? null;
+  if (file && !audioFileNameInput.value) {
+    audioFileNameInput.value = file.name;
+  }
+  if (file) {
+    setUploadStatus(`Ready to upload ${file.name} (${formatSize(file.size)})`, 'info');
+  } else {
+    setUploadStatus('Select an audio file to upload.', 'muted');
+  }
+});
+
+uploadAudioBtn.addEventListener('click', async () => {
+  const file = audioFileInput.files?.[0] ?? null;
+  if (!file) {
+    setUploadStatus('Please choose an audio file first.', 'error');
+    return;
+  }
+  const desiredName = audioFileNameInput.value.trim() || file.name;
+  if (!desiredName) {
+    setUploadStatus('Provide a filename for the upload.', 'error');
+    return;
+  }
+
+  uploadAudioBtn.disabled = true;
+  setUploadStatus(`Uploading ${desiredName}…`, 'info');
+  try {
+    const result = await clientApi.uploadAudioFile(file, desiredName);
+    setUploadStatus(`Uploaded ${result.filename} (${formatSize(result.size)})`, 'success');
+    audioFileInput.value = '';
+    audioFileNameInput.value = '';
+  } catch (error) {
+    setUploadStatus(`Upload failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+  } finally {
+    uploadAudioBtn.disabled = false;
+  }
 });
 
 runBenchmarkBtn.addEventListener('click', () => {
@@ -303,4 +346,9 @@ function escapeHtml(value: string): string {
         return char;
     }
   });
+}
+
+function setUploadStatus(text: string, variant: 'muted' | 'info' | 'success' | 'error' = 'muted') {
+  uploadStatusEl.textContent = text;
+  uploadStatusEl.className = `text-xs ${variant === 'error' ? 'text-red-600' : variant === 'success' ? 'text-emerald-600' : variant === 'info' ? 'text-slate-600' : 'text-slate-500'}`;
 }

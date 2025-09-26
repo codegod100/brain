@@ -283,6 +283,52 @@ export const clientApi = {
     }
     void callRunCommand('benchmark');
   },
+  async uploadAudioFile(file: File, name?: string): Promise<{ filename: string; size: number; contentType?: string }> {
+    if (!file) {
+      throw new Error('No file provided');
+    }
+
+    const uploadName = (name && name.trim()) || file.name;
+    if (!uploadName) {
+      throw new Error('Filename is required');
+    }
+
+    ui?.ui_append_log_line?.(`${LOG_PREFIX} preparing upload ${uploadName} (${formatBytes(file.size)})`);
+
+    const arrayBuffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+    const base64 = toBase64(bytes);
+    const payload = {
+      filename: uploadName,
+      base64,
+      contentType: file.type || undefined,
+    };
+    const url = toHttpUrl('/upload');
+
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } catch (error) {
+      ui?.ui_append_log_line?.(`${LOG_PREFIX} upload failed: ${String(error)}`);
+      throw error instanceof Error ? error : new Error(String(error));
+    }
+
+    if (!response.ok) {
+      const text = await response.text();
+      const message = text || response.statusText;
+      ui?.ui_append_log_line?.(`${LOG_PREFIX} upload failed (${response.status}): ${message}`);
+      throw new Error(message || 'Upload failed');
+    }
+
+    const data = (await response.json()) as { filename: string; size: number; contentType?: string };
+    ui?.ui_append_log_line?.(`${LOG_PREFIX} upload complete: ${JSON.stringify(data)}`);
+    await callRunCommand('audio list');
+    return data;
+  },
   setHost(url: string): void {
     setHost(url);
   },
@@ -322,6 +368,18 @@ function normalizeAudioList(raw: unknown[]): AudioItem[] {
       return null;
     })
     .filter((item): item is AudioItem => item !== null);
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
 function getBenchmarkSummaryFromResponse(resp: unknown): BenchmarkSummary | null {
@@ -382,3 +440,13 @@ async function handleBenchmarkRequest(request: BenchmarkRequestMessage): Promise
 }
 
 export type { HubApi };
+
+function toBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    const chunk = bytes.subarray(offset, offset + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}

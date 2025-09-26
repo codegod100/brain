@@ -10,6 +10,12 @@ const PROJECT_FILES = [
     "wrangler.jsonc",
 ];
 
+const CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+};
+
 const randomRequestId = () =>
     typeof globalThis.crypto?.randomUUID === "function"
         ? globalThis.crypto.randomUUID()
@@ -1066,12 +1072,19 @@ export default {
                 const object = await env.AUDIO_BUCKET.get(filename);
                 
                 if (!object) {
-                    return new Response('Audio file not found', { status: 404 });
+                    return new Response('Audio file not found', {
+                        status: 404,
+                        headers: {
+                            ...CORS_HEADERS,
+                            'Content-Type': 'text/plain',
+                        },
+                    });
                 }
                 
                 // Return the audio file with appropriate headers
                 return new Response(object.body, {
                     headers: {
+                        ...CORS_HEADERS,
                         'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream',
                         'Content-Length': object.size.toString(),
                         'Cache-Control': 'public, max-age=3600', // Cache for 1 hour
@@ -1079,11 +1092,36 @@ export default {
                 });
             } catch (error) {
                 console.error('Error serving audio file:', error);
-                return new Response('Internal server error', { status: 500 });
+                return new Response('Internal server error', {
+                    status: 500,
+                    headers: {
+                        ...CORS_HEADERS,
+                        'Content-Type': 'text/plain',
+                    },
+                });
             }
         }
 
-        if (url.pathname === '/upload' && request.method === 'POST') {
+        if (url.pathname === '/upload') {
+            if (request.method === 'OPTIONS') {
+                return new Response(null, {
+                    status: 204,
+                    headers: {
+                        ...CORS_HEADERS,
+                    },
+                });
+            }
+
+            if (request.method !== 'POST') {
+                return new Response(JSON.stringify({ error: 'Method not allowed' }), {
+                    status: 405,
+                    headers: {
+                        ...CORS_HEADERS,
+                        'Content-Type': 'application/json',
+                    },
+                });
+            }
+
             let payload: { filename?: string; base64?: string; contentType?: string };
             try {
                 payload = await request.json();
@@ -1092,7 +1130,10 @@ export default {
                     JSON.stringify({ error: 'Invalid JSON body', details: error instanceof Error ? error.message : String(error) }),
                     {
                         status: 400,
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: {
+                            ...CORS_HEADERS,
+                            'Content-Type': 'application/json',
+                        },
                     },
                 );
             }
@@ -1102,14 +1143,20 @@ export default {
             if (!filename || typeof filename !== 'string') {
                 return new Response(JSON.stringify({ error: 'filename is required' }), {
                     status: 400,
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: {
+                        ...CORS_HEADERS,
+                        'Content-Type': 'application/json',
+                    },
                 });
             }
 
             if (!base64 || typeof base64 !== 'string') {
                 return new Response(JSON.stringify({ error: 'base64 is required' }), {
                     status: 400,
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: {
+                        ...CORS_HEADERS,
+                        'Content-Type': 'application/json',
+                    },
                 });
             }
 
@@ -1139,7 +1186,10 @@ export default {
                     JSON.stringify({ filename, size: bytes.length, contentType: inferredContentType }),
                     {
                         status: 200,
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: {
+                            ...CORS_HEADERS,
+                            'Content-Type': 'application/json',
+                        },
                     },
                 );
             } catch (error) {
@@ -1147,7 +1197,10 @@ export default {
                     JSON.stringify({ error: 'Upload failed', details: error instanceof Error ? error.message : String(error) }),
                     {
                         status: 500,
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: {
+                            ...CORS_HEADERS,
+                            'Content-Type': 'application/json',
+                        },
                     },
                 );
             }
