@@ -7,6 +7,7 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as https from "node:https";
 import net from "node:net";
+import os from "node:os";
 import player from "play-sound";
 
 // Parse command line arguments
@@ -56,6 +57,10 @@ type ClientDescriptor = {
 
 class Client extends RpcTarget {
   broadcast(message: unknown) {
+    if (isBenchmarkRequest(message)) {
+      void respondToBenchmark(message);
+      return;
+    }
     if (typeof message === "string") {
       console.log(`Incoming message! ${message}`);
       broadcastSocketEvent('hub-message', { message, format: 'string' });
@@ -124,6 +129,24 @@ type SocketResponse = {
   payload?: unknown;
 };
 
+type BenchmarkRequestPayload = {
+  type?: string;
+  requestId?: string;
+  iterations?: number;
+  timeoutMs?: number;
+  requesterId?: string | null;
+  startedAt?: string;
+};
+
+function isBenchmarkRequest(message: unknown): message is BenchmarkRequestPayload {
+  return (
+    !!message &&
+    typeof message === 'object' &&
+    (message as any).type === 'benchmark-request' &&
+    typeof (message as any).requestId === 'string'
+  );
+}
+
 const api = newWebSocketRpcSession<HubApi>(host);
 const descriptor: ClientDescriptor = {
   id: randomUUID(),
@@ -152,6 +175,60 @@ try {
 }
 
 const rl = createInterface({ input: stdin, output: stdout });
+
+async function respondToBenchmark(request: BenchmarkRequestPayload) {
+  const defaultIterations = 100_000;
+  const maxIterations = 10_000_000;
+  const iterationsRaw = typeof request.iterations === 'number' && Number.isFinite(request.iterations)
+    ? request.iterations
+    : defaultIterations;
+  const iterations = Math.min(Math.max(Math.trunc(iterationsRaw), 1), maxIterations);
+  const label = `[BENCHMARK] ${request.requestId}`;
+  console.log(`${label} running ${iterations.toLocaleString()} iterations...`);
+  broadcastSocketEvent('benchmark-request', {
+    requestId: request.requestId,
+    iterations,
+    timeoutMs: request.timeoutMs ?? null,
+  });
+
+  const start = process.hrtime.bigint();
+  let checksum = 0;
+  for (let i = 0; i < iterations; i += 1) {
+    checksum += Math.sin(i) + Math.cos(i / 2);
+  }
+  const end = process.hrtime.bigint();
+  const durationMs = Number(end - start) / 1_000_000;
+  const opsPerSec = durationMs > 0 ? (iterations / durationMs) * 1000 : iterations;
+  console.log(`${label} completed in ${durationMs.toFixed(2)}ms (~${opsPerSec.toFixed(0)} ops/s)`);
+
+  const payload = {
+    iterations,
+    opsPerSec,
+    checksum,
+    startedAt: request.startedAt ?? new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+    timeoutMs: request.timeoutMs ?? null,
+    clientId: descriptor.id,
+    hostname: os.hostname(),
+    platform: os.platform(),
+    arch: os.arch(),
+  };
+
+  try {
+    await api.runCommand(
+      `benchmark report ${request.requestId} ${durationMs.toFixed(3)} ${JSON.stringify(payload)}`,
+      descriptor.id,
+    );
+    broadcastSocketEvent('benchmark-result', {
+      requestId: request.requestId,
+      durationMs,
+      opsPerSec,
+      checksum,
+    });
+  } catch (error) {
+    console.error(`${label} failed to report`, error);
+  }
+}
 
 // Audio playback function
 async function playAudio(url: string, filename: string) {

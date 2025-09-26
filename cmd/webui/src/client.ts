@@ -7,11 +7,42 @@ export type AudioItem = {
   source?: string;
 };
 
+type BenchmarkResult = {
+  clientId: string;
+  durationMs: number;
+  iterations: number;
+  opsPerSecond?: number;
+  receivedAt: string;
+  details?: unknown;
+};
+
+type BenchmarkSummary = {
+  command: 'benchmark';
+  requestId: string;
+  requesterId: string | null;
+  iterations: number;
+  timeoutMs: number;
+  startedAt: string;
+  completedAt: string;
+  durationMs: number;
+  participants: number;
+  responded: number;
+  pending: string[];
+  results: BenchmarkResult[];
+  message: string;
+};
+
+type BenchmarkUpdate =
+  | { kind: 'summary'; summary: BenchmarkSummary }
+  | { kind: 'error'; error: string }
+  | { kind: 'reset' };
+
 export type UiBindings = {
   ui_append_log_line?: (line: string) => void;
   ui_set_status_text?: (text: string) => void;
   ui_set_log_lines?: (lines: string[]) => void;
   ui_set_audio_files?: (files: AudioItem[]) => void;
+  ui_set_benchmark_result?: (update: BenchmarkUpdate) => void;
 };
 
 type HubApi = {
@@ -38,6 +69,15 @@ type BroadcastPayload = {
   [key: string]: unknown;
 };
 
+type BenchmarkRequestMessage = {
+  type: 'benchmark-request';
+  requestId: string;
+  iterations?: number;
+  requesterId?: string | null;
+  timeoutMs?: number;
+  startedAt?: string;
+};
+
 let ui: UiBindings | null = null;
 let api: HubApi | null = null;
 let descriptor: ClientDescriptor | null = null;
@@ -62,9 +102,7 @@ function determineHost(): string {
   const params = new URLSearchParams(window.location.search);
   if (params.has("ws")) return params.get("ws")!;
   if (params.has("host")) return params.get("host")!;
-  const { protocol, host } = window.location;
-  const wsProto = protocol === "https:" ? "wss" : "ws";
-  return `${wsProto}://${host}/ws`;
+  return "ws://localhost:8787/ws";
 }
 
 function toHttpUrl(path: string): string {
@@ -103,6 +141,9 @@ class HubClient extends RpcTarget {
     }
     if (typeof payload?.status === "string") {
       setStatus(payload.status);
+    }
+    if (payload?.type === "benchmark-request") {
+      void handleBenchmarkRequest(payload as BenchmarkRequestMessage);
     }
     if (payload?.type === "play-audio" && typeof payload.filename === "string") {
       const filename = payload.filename as string;
@@ -149,10 +190,15 @@ async function ensureConnection(): Promise<boolean> {
   }
 }
 
-async function callRunCommand(command: string, clientId?: string): Promise<void> {
+async function callRunCommand(command: string, clientId: string | undefined = descriptor?.id ?? undefined): Promise<void> {
+  const normalized = command.trim().toLowerCase();
+  const isBenchmarkCommand = normalized.startsWith('benchmark') && !normalized.startsWith('benchmark report');
   if (!api) await ensureConnection();
   if (!api) {
     logLine(`${LOG_PREFIX} cannot send command; not connected`);
+    if (isBenchmarkCommand) {
+      ui?.ui_set_benchmark_result?.({ kind: 'error', error: 'Not connected to hub' });
+    }
     return;
   }
   try {
@@ -161,8 +207,21 @@ async function callRunCommand(command: string, clientId?: string): Promise<void>
     // if response lists audio files, reflect
     const files = getAudioFilesFromResponse(response);
     if (files) ui?.ui_set_audio_files?.(files);
+
+    const summary = getBenchmarkSummaryFromResponse(response);
+    if (summary) {
+      ui?.ui_set_benchmark_result?.({ kind: 'summary', summary });
+    } else if (isBenchmarkCommand) {
+      const error = getBenchmarkErrorFromResponse(response);
+      if (error) {
+        ui?.ui_set_benchmark_result?.({ kind: 'error', error });
+      }
+    }
   } catch (error) {
     logLine(`${LOG_PREFIX} command error: ${String(error)}`);
+    if (isBenchmarkCommand) {
+      ui?.ui_set_benchmark_result?.({ kind: 'error', error: String(error) });
+    }
   }
 }
 
@@ -213,6 +272,17 @@ export const clientApi = {
   listAudioFiles(): void {
     void callRunCommand("audio list");
   },
+  runBenchmark(command?: string | number): void {
+    if (typeof command === 'number' && Number.isFinite(command)) {
+      void callRunCommand(`benchmark ${Math.trunc(command)}`);
+      return;
+    }
+    if (typeof command === 'string' && command.trim()) {
+      void callRunCommand(command.trim());
+      return;
+    }
+    void callRunCommand('benchmark');
+  },
   setHost(url: string): void {
     setHost(url);
   },
@@ -252,6 +322,63 @@ function normalizeAudioList(raw: unknown[]): AudioItem[] {
       return null;
     })
     .filter((item): item is AudioItem => item !== null);
+}
+
+function getBenchmarkSummaryFromResponse(resp: unknown): BenchmarkSummary | null {
+  if (!resp || typeof resp !== 'object') return null;
+  const candidate = resp as Record<string, unknown>;
+  if (candidate.command !== 'benchmark') return null;
+  if (!Array.isArray(candidate.results)) return null;
+  return candidate as BenchmarkSummary;
+}
+
+function getBenchmarkErrorFromResponse(resp: unknown): string | null {
+  if (!resp || typeof resp !== 'object') return null;
+  const candidate = resp as Record<string, unknown>;
+  if (candidate.command !== 'benchmark') return null;
+  if (typeof candidate.error === 'string') return candidate.error;
+  return null;
+}
+
+async function handleBenchmarkRequest(request: BenchmarkRequestMessage): Promise<void> {
+  const defaultIterations = 50_000;
+  const maxIterations = 5_000_000;
+  const iterationsRaw = typeof request.iterations === 'number' && Number.isFinite(request.iterations)
+    ? request.iterations
+    : defaultIterations;
+  const iterations = Math.min(Math.max(Math.trunc(iterationsRaw), 1), maxIterations);
+  const logLabel = `${LOG_PREFIX} benchmark`;
+  logLine(`${logLabel} request ${request.requestId} iterations=${iterations}`);
+
+  const started = performance.now();
+  // Simple CPU-bound benchmark: math operations in a loop
+  let checksum = 0;
+  for (let i = 0; i < iterations; i += 1) {
+    checksum += Math.sin(i) + Math.cos(i / 2);
+  }
+  const durationMs = performance.now() - started;
+  const opsPerSec = durationMs > 0 ? (iterations / durationMs) * 1000 : iterations;
+
+  const payload = {
+    iterations,
+    opsPerSec,
+    checksum,
+    startedAt: request.startedAt ?? new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+    timeoutMs: request.timeoutMs ?? null,
+    clientId: descriptor?.id ?? null,
+    userAgent: navigator.userAgent,
+  };
+
+  logLine(`${logLabel} ${request.requestId} completed in ${durationMs.toFixed(2)}ms (≈${opsPerSec.toFixed(0)} ops/s)`);
+
+  try {
+    await callRunCommand(
+      `benchmark report ${request.requestId} ${durationMs.toFixed(3)} ${JSON.stringify(payload)}`,
+    );
+  } catch (error) {
+    logLine(`${logLabel} failed to report: ${String(error)}`);
+  }
 }
 
 export type { HubApi };

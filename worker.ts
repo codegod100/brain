@@ -10,6 +10,11 @@ const PROJECT_FILES = [
     "wrangler.jsonc",
 ];
 
+const randomRequestId = () =>
+    typeof globalThis.crypto?.randomUUID === "function"
+        ? globalThis.crypto.randomUUID()
+        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+
 type ClientCallback = {
     broadcast(message: unknown): Promise<void> | void;
 };
@@ -23,6 +28,43 @@ type ClientInfo = {
 type ClientRecord = {
     stub: RpcStub<ClientCallback>;
     info: ClientInfo;
+};
+
+type BenchmarkResult = {
+    clientId: string;
+    durationMs: number;
+    iterations: number;
+    opsPerSecond?: number;
+    receivedAt: string;
+    details?: unknown;
+};
+
+type PendingBenchmark = {
+    requestId: string;
+    requesterId: string | null;
+    createdAt: number;
+    iterations: number;
+    timeoutMs: number;
+    expected: Set<string>;
+    results: BenchmarkResult[];
+    resolve: (summary: BenchmarkSummary) => void;
+    timeoutHandle: ReturnType<typeof setTimeout>;
+};
+
+type BenchmarkSummary = {
+    command: "benchmark";
+    requestId: string;
+    requesterId: string | null;
+    iterations: number;
+    timeoutMs: number;
+    startedAt: string;
+    completedAt: string;
+    durationMs: number;
+    participants: number;
+    responded: number;
+    pending: string[];
+    results: BenchmarkResult[];
+    message: string;
 };
 
 function isClientInfo(value: unknown): value is ClientInfo {
@@ -43,9 +85,24 @@ type Env = {
 
 class HubApi extends RpcTarget {
     private clients: ClientRecord[] = [];
-    private readonly commands = ["help", "storage", "put", "get", "delete", "keys", "expire", "ttl", "peers", "whoami", "broadcast", "audio"] as const;
+    private readonly commands = [
+        "help",
+        "storage",
+        "put",
+        "get",
+        "delete",
+        "keys",
+        "expire",
+        "ttl",
+        "peers",
+        "whoami",
+        "benchmark",
+        "broadcast",
+        "audio",
+    ] as const;
     private readonly files = [...PROJECT_FILES];
     private state?: DurableObjectState;
+    private pendingBenchmarks = new Map<string, PendingBenchmark>();
 
     async addClient(stub: RpcStub<ClientCallback>, rawInfo: unknown) {
         if (!isClientInfo(rawInfo)) {
@@ -117,8 +174,44 @@ class HubApi extends RpcTarget {
                 client: HubApi.cloneInfo(record.info),
                 total: this.clients.length,
             }).catch((error) => console.error("Failed to broadcast leave", error));
+            this.handleBenchmarkDeparture(record.info.id);
         }
         console.log(`Remaining clients: ${this.clients.length}`);
+    }
+
+    private resolveBenchmark(requestId: string, message?: string) {
+        const pending = this.pendingBenchmarks.get(requestId);
+        if (!pending) {
+            return;
+        }
+        clearTimeout(pending.timeoutHandle);
+        this.pendingBenchmarks.delete(requestId);
+        const completedAt = Date.now();
+        const summary: BenchmarkSummary = {
+            command: "benchmark",
+            requestId,
+            requesterId: pending.requesterId,
+            iterations: pending.iterations,
+            timeoutMs: pending.timeoutMs,
+            startedAt: new Date(pending.createdAt).toISOString(),
+            completedAt: new Date(completedAt).toISOString(),
+            durationMs: completedAt - pending.createdAt,
+            participants: pending.results.length + pending.expected.size,
+            responded: pending.results.length,
+            pending: [...pending.expected],
+            results: [...pending.results],
+            message:
+                message ?? (pending.expected.size === 0 ? "Benchmark completed" : "Benchmark completed with missing responses"),
+        };
+        pending.resolve(summary);
+    }
+
+    private handleBenchmarkDeparture(clientId: string) {
+        for (const pending of this.pendingBenchmarks.values()) {
+            if (pending.expected.delete(clientId) && pending.expected.size === 0) {
+                this.resolveBenchmark(pending.requestId);
+            }
+        }
     }
 
     async broadcast(message: unknown) {
@@ -492,6 +585,167 @@ class HubApi extends RpcTarget {
                         vector: clientInfo.info.vector
                     })
                 };
+            case "benchmark": {
+                const subcommand = parts[1]?.toLowerCase();
+                if (subcommand === "report") {
+                    if (parts.length < 4) {
+                        return {
+                            command: "benchmark-report",
+                            error: "Usage: benchmark report <requestId> <durationMs> [details-json]",
+                        };
+                    }
+
+                    const requestId = parts[2];
+                    const durationMs = Number.parseFloat(parts[3]);
+                    if (!Number.isFinite(durationMs) || durationMs < 0) {
+                        return {
+                            command: "benchmark-report",
+                            requestId,
+                            error: "durationMs must be a non-negative number",
+                        };
+                    }
+
+                    const rawDetails = parts.slice(4).join(" ");
+                    let details: unknown = undefined;
+                    if (rawDetails) {
+                        try {
+                            details = JSON.parse(rawDetails);
+                        } catch (error) {
+                            details = rawDetails;
+                        }
+                    }
+
+                    const pending = this.pendingBenchmarks.get(requestId);
+                    if (!pending) {
+                        return {
+                            command: "benchmark-report",
+                            requestId,
+                            accepted: false,
+                            error: "Unknown benchmark request",
+                        };
+                    }
+
+                    const responderId = clientId ?? "unknown";
+                    if (!pending.results.some((result) => result.clientId === responderId)) {
+                        const opsPerSecond =
+                            typeof details === "object" && details !== null && typeof (details as any).opsPerSec === "number"
+                                ? (details as any).opsPerSec
+                                : undefined;
+                        const iterations =
+                            typeof details === "object" && details !== null && typeof (details as any).iterations === "number"
+                                ? (details as any).iterations
+                                : pending.iterations;
+                        pending.results.push({
+                            clientId: responderId,
+                            durationMs,
+                            iterations,
+                            opsPerSecond,
+                            receivedAt: new Date().toISOString(),
+                            details,
+                        });
+                    }
+
+                    pending.expected.delete(responderId);
+                    if (pending.expected.size === 0) {
+                        this.resolveBenchmark(requestId);
+                    }
+
+                    return {
+                        command: "benchmark-report",
+                        requestId,
+                        accepted: true,
+                    };
+                }
+
+                const tokens = parts.slice(1).filter(Boolean);
+                let iterations = 50000;
+                let timeoutMs = 5000;
+
+                for (const token of tokens) {
+                    if (!token || token.includes("report")) {
+                        continue;
+                    }
+                    const optionMatch = token.match(/^(\w+)=([\w.-]+)$/);
+                    if (optionMatch) {
+                        const [, rawKey, rawValue] = optionMatch;
+                        const key = rawKey.toLowerCase();
+                        if (key === "timeout" || key === "timeoutms") {
+                            const parsed = Number.parseInt(rawValue, 10);
+                            if (Number.isFinite(parsed) && parsed > 0) {
+                                timeoutMs = parsed;
+                            }
+                        } else if (key === "iterations" || key === "loops") {
+                            const parsed = Number.parseInt(rawValue, 10);
+                            if (Number.isFinite(parsed) && parsed > 0) {
+                                iterations = parsed;
+                            }
+                        }
+                        continue;
+                    }
+                    if (/^\d+$/.test(token)) {
+                        const parsed = Number.parseInt(token, 10);
+                        if (parsed > 0) {
+                            iterations = parsed;
+                        }
+                    }
+                }
+
+                const participants = [...this.clients];
+                if (participants.length === 0) {
+                    return {
+                        command: "benchmark",
+                        error: "No connected clients available for benchmarking",
+                    };
+                }
+
+                const requestId = randomRequestId();
+                const createdAt = Date.now();
+                const expected = new Set(participants.map(({ info }) => info.id));
+
+                const summaryPromise = new Promise<BenchmarkSummary>((resolve) => {
+                    const timeoutHandle = setTimeout(() => {
+                        this.resolveBenchmark(requestId, "Benchmark timed out before all nodes replied");
+                    }, timeoutMs);
+                    this.pendingBenchmarks.set(requestId, {
+                        requestId,
+                        requesterId: clientId ?? null,
+                        createdAt,
+                        iterations,
+                        timeoutMs,
+                        expected,
+                        results: [],
+                        resolve,
+                        timeoutHandle,
+                    });
+                });
+
+                const payload = {
+                    type: "benchmark-request",
+                    requestId,
+                    requesterId: clientId ?? null,
+                    iterations,
+                    timeoutMs,
+                    startedAt: new Date(createdAt).toISOString(),
+                };
+
+                await Promise.all(
+                    participants.map(async ({ stub, info }) => {
+                        try {
+                            await stub.broadcast(payload);
+                        } catch (error) {
+                            console.error("Failed to dispatch benchmark request", error);
+                            expected.delete(info.id);
+                            this.removeClient(stub);
+                        }
+                    }),
+                );
+
+                if (expected.size === 0) {
+                    this.resolveBenchmark(requestId, "Benchmark request could not reach any clients");
+                }
+
+                return await summaryPromise;
+            }
             case "broadcast":
                 // Parse command arguments: "broadcast message"
                 if (parts.length < 2) {
