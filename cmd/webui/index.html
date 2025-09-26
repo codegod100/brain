@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Brain Web UI</title>
+  </head>
+  <body class="min-h-screen bg-slate-50 text-slate-900">
+    <div class="mx-auto max-w-5xl p-6">
+      <header class="mb-6 flex items-center justify-between">
+        <h1 class="text-2xl font-semibold">Brain Web UI</h1>
+        <div id="status" class="text-sm text-slate-600">Status: idle</div>
+      </header>
+
+      <section class="mb-6 grid gap-4 md:grid-cols-2">
+        <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <h2 class="mb-3 text-lg font-medium">Connection</h2>
+          <div class="flex flex-col gap-2">
+            <label class="text-sm text-slate-600" for="host">WebSocket</label>
+            <input id="host" class="w-full rounded border border-slate-300 px-3 py-2 text-sm" placeholder="ws(s)://host/ws" />
+            <div class="flex gap-2">
+              <button id="connect" class="rounded bg-blue-600 px-3 py-2 text-white hover:bg-blue-700">Connect</button>
+              <button id="refresh" class="rounded bg-slate-800 px-3 py-2 text-white hover:bg-slate-900">Refresh Status</button>
+              <button id="peers" class="rounded bg-slate-600 px-3 py-2 text-white hover:bg-slate-700">Show Peers</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <h2 class="mb-3 text-lg font-medium">Command</h2>
+          <div class="flex flex-col gap-2">
+            <input id="command" class="w-full rounded border border-slate-300 px-3 py-2 text-sm" placeholder="type a command, e.g. status" />
+            <div class="flex gap-2">
+              <button id="run" class="rounded bg-emerald-600 px-3 py-2 text-white hover:bg-emerald-700">Run</button>
+              <button id="files" class="rounded bg-slate-800 px-3 py-2 text-white hover:bg-slate-900">Files</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="mb-6 grid gap-4 md:grid-cols-2">
+        <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <h2 class="mb-3 text-lg font-medium">Audio</h2>
+          <div class="flex flex-col gap-2">
+            <input id="playName" class="w-full rounded border border-slate-300 px-3 py-2 text-sm" placeholder="filename to play" />
+            <div class="flex gap-2">
+              <button id="play" class="rounded bg-fuchsia-600 px-3 py-2 text-white hover:bg-fuchsia-700">Play</button>
+              <button id="broadcastPlay" class="rounded bg-purple-600 px-3 py-2 text-white hover:bg-purple-700">Broadcast</button>
+            </div>
+          </div>
+          <div class="mt-4">
+            <h3 class="mb-2 text-sm font-medium text-slate-700">Files</h3>
+            <ul id="audioList" class="divide-y divide-slate-200"></ul>
+          </div>
+        </div>
+
+        <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <h2 class="mb-3 text-lg font-medium">Logs</h2>
+          <pre id="logs" class="h-72 overflow-auto rounded border border-slate-200 bg-slate-50 p-3 text-xs leading-relaxed"></pre>
+        </div>
+      </section>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+  </html>

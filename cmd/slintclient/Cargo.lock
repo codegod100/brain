@@ -4158,6 +4158,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "chrono",
+ "js-sys",
  "rfd",
  "serde",
  "serde_json",
@@ -4165,6 +4166,7 @@ dependencies = [
  "slint-build",
  "thiserror 1.0.69",
  "url",
+ "wasm-bindgen",
 ]
 
 [[package]]

@@ -1,22 +1,35 @@
+#[cfg(not(target_arch = "wasm32"))]
 mod socket_client;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::socket_client::{SharedSocketClient, SocketClient, SocketMessage};
 
+#[cfg(not(target_arch = "wasm32"))]
 use base64::engine::general_purpose::STANDARD as Base64Engine;
+#[cfg(not(target_arch = "wasm32"))]
 use base64::Engine;
+#[cfg(not(target_arch = "wasm32"))]
 use chrono::Local;
 use slint::{Model, ModelRc, SharedString, VecModel};
-use std::rc::Rc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
 use url::Url;
 
 slint::include_modules!();
 
+#[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_CONTROL_URL: &str = "http://127.0.0.1:4455";
+#[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_CONTROL_PORT: u16 = 4455;
 const LOG_LIMIT: usize = 500;
 
@@ -81,6 +94,7 @@ struct BroadcastPlayEvent {
     is_self: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct AppState {
     control_url: Url,
     socket: Mutex<Option<SharedSocketClient>>,
@@ -91,8 +105,13 @@ struct AppState {
     ui: slint::Weak<AppWindow>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl AppState {
-    fn new(control_url: Url, ui: slint::Weak<AppWindow>, log_tx: std::sync::mpsc::Sender<SharedString>) -> Arc<Self> {
+    fn new(
+        control_url: Url,
+        ui: slint::Weak<AppWindow>,
+        log_tx: std::sync::mpsc::Sender<SharedString>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             control_url,
             socket: Mutex::new(None),
@@ -593,6 +612,7 @@ impl AppState {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn fetch_status(socket: SharedSocketClient) -> Result<StatusUpdate, String> {
     let message = socket.request("status", None).map_err(|e| e.to_string())?;
     let status: StatusResponse = parse_data(message.data).map_err(|e| e.to_string())?;
@@ -613,6 +633,7 @@ fn parse_data<T: serde::de::DeserializeOwned>(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn fetch_files(socket: SharedSocketClient) -> Result<Vec<String>, String> {
     let message = socket.request("files", None).map_err(|e| e.to_string())?;
     let response: FilesResponse = parse_data(message.data).map_err(|e| e.to_string())?;
@@ -722,12 +743,14 @@ fn detect_content_type(name: &str) -> &'static str {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn file_name_from_path(path: &Path) -> Option<String> {
     path.file_name()
         .and_then(|name| name.to_str())
         .map(|s| s.to_string())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn compute_socket_address(control_url: &Url) -> Result<String, String> {
     let host = control_url.host_str().unwrap_or("127.0.0.1");
     if let Ok(port_var) = std::env::var("CLIENT_SOCKET_PORT") {
@@ -748,6 +771,7 @@ fn join_host_port(host: &str, port: u16) -> String {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_control_url() -> Url {
     let control =
         std::env::var("CLIENT_CONTROL_URL").unwrap_or_else(|_| DEFAULT_CONTROL_URL.to_string());
@@ -757,6 +781,7 @@ fn parse_control_url() -> Url {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     let control_url = parse_control_url();
     let app = AppWindow::new().expect("failed to construct UI");
@@ -785,7 +810,9 @@ fn main() {
                     if let Some(ui) = ui_weak.upgrade() {
                         let model = ui.get_log_entries();
                         // Downcast to VecModel to mutate in place
-                        if let Some(vec_model) = model.as_any().downcast_ref::<VecModel<SharedString>>() {
+                        if let Some(vec_model) =
+                            model.as_any().downcast_ref::<VecModel<SharedString>>()
+                        {
                             while vec_model.row_count() >= LOG_LIMIT {
                                 vec_model.remove(0);
                             }
@@ -797,9 +824,13 @@ fn main() {
                             // Fallback: re-set the model (should be rare)
                             let mut current: Vec<SharedString> = Vec::new();
                             for i in 0..model.row_count() {
-                                if let Some(v) = model.row_data(i) { current.push(v); }
+                                if let Some(v) = model.row_data(i) {
+                                    current.push(v);
+                                }
                             }
-                            if current.len() >= LOG_LIMIT { current.remove(0); }
+                            if current.len() >= LOG_LIMIT {
+                                current.remove(0);
+                            }
                             current.push(entry);
                             ui.set_log_entries(ModelRc::new(VecModel::from(current)));
                             let rev = ui.get_log_force_rev();
@@ -887,5 +918,22 @@ fn main() {
 
     state.start_connect();
 
+    app.run().unwrap();
+}
+
+// WebAssembly entry point (no threads/sockets here)
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(start)]
+pub fn wasm_main() {
+    let app = AppWindow::new().expect("failed to construct UI");
+    app.set_log_entries(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
+    app.set_audio_files(ModelRc::new(VecModel::from(Vec::<SharedString>::new())));
+    app.set_command_text("".into());
+    app.set_play_text("".into());
+    app.set_broadcast_text("".into());
+    app.set_upload_name_text("".into());
     app.run().unwrap();
 }

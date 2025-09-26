@@ -1,10 +1,24 @@
 import { Button, LineEdit, ScrollView } from "std-widgets.slint";
 
+component ActionButton inherits Button {
+    horizontal-stretch: 1;
+    preferred-height: 36px;
+}
+
+component TextInput inherits LineEdit {
+    horizontal-stretch: 1;
+    preferred-height: 32px;
+}
+
+component SectionLabel inherits Text {
+    font-weight: 600;
+    color: #e0e0e0;
+}
+
 export component AppWindow inherits Window {
     preferred-width: 900px;
     preferred-height: 600px;
     title: "Brain Hub (Slint)";
-
     in property <string> status_text: "Status: pending...";
     in-out property <[string]> log_entries;
     in-out property <[string]> audio_files;
@@ -36,58 +50,113 @@ export component AppWindow inherits Window {
         spacing: 8px;
         padding: 12px;
 
-        HorizontalLayout {
-            spacing: 8px;
-            Text { text: root.status_text; horizontal-stretch: 1; }
-            Button { text: "Refresh Status"; clicked => { root.refresh_status(); } }
+        if root.width < 640px: VerticalLayout {
+            spacing: 10px;
+            SectionLabel { text: root.status_text; wrap: TextWrap.word-wrap; }
+            ActionButton { text: "Refresh Status"; clicked => { root.refresh_status(); } }
+            HorizontalLayout {
+                spacing: 6px;
+                ActionButton { text: "List Files"; clicked => { root.fetch_files(); } }
+                ActionButton { text: "Show Peers"; clicked => { root.show_peers(); } }
+            }
+        }
+        if root.width >= 640px: VerticalLayout {
+            spacing: 6px;
+            HorizontalLayout {
+                spacing: 8px;
+                SectionLabel { text: root.status_text; horizontal-stretch: 1; }
+                ActionButton { text: "Refresh Status"; clicked => { root.refresh_status(); } }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                ActionButton { text: "List Files"; clicked => { root.fetch_files(); } }
+                ActionButton { text: "Show Peers"; clicked => { root.show_peers(); } }
+            }
         }
 
-        HorizontalLayout {
-            spacing: 8px;
-            Button { text: "List Files"; clicked => { root.fetch_files(); } }
-            Button { text: "Show Peers"; clicked => { root.show_peers(); } }
-        }
+        Rectangle { height: 1px; background: #303030; horizontal-stretch: 1; }
 
-        HorizontalLayout {
+        if root.width < 640px: VerticalLayout {
+            spacing: 6px;
+            SectionLabel { text: "Command"; }
+            TextInput { text <=> root.command_text; placeholder-text: "run command"; }
+            ActionButton {
+                text: "Send";
+                clicked => { root.send_command(root.command_text); }
+            }
+        }
+        if root.width >= 640px: HorizontalLayout {
             spacing: 8px;
-            Text { text: "Command:"; }
-            LineEdit { text <=> root.command_text; horizontal-stretch: 1; }
-            Button {
+            SectionLabel { text: "Command"; }
+            TextInput { text <=> root.command_text; }
+            ActionButton {
                 text: "Send";
                 clicked => { root.send_command(root.command_text); }
             }
         }
 
-        HorizontalLayout {
+        if root.width < 640px: VerticalLayout {
+            spacing: 6px;
+            SectionLabel { text: "Play Filename"; }
+            TextInput { text <=> root.play_text; placeholder-text: "track.wav"; }
+            ActionButton {
+                text: "Play";
+                clicked => { root.play_audio(root.play_text); }
+            }
+        }
+        if root.width >= 640px: HorizontalLayout {
             spacing: 8px;
-            Text { text: "Play filename:"; }
-            LineEdit { text <=> root.play_text; horizontal-stretch: 1; }
-            Button {
+            SectionLabel { text: "Play Filename"; }
+            TextInput { text <=> root.play_text; }
+            ActionButton {
                 text: "Play";
                 clicked => { root.play_audio(root.play_text); }
             }
         }
 
-        HorizontalLayout {
+        if root.width < 640px: VerticalLayout {
+            spacing: 6px;
+            SectionLabel { text: "Broadcast"; }
+            TextInput { text <=> root.broadcast_text; placeholder-text: "message"; }
+            HorizontalLayout {
+                spacing: 6px;
+                ActionButton { text: "Broadcast"; clicked => { root.broadcast_message(root.broadcast_text); } }
+                ActionButton { text: "Play Remotely"; clicked => { root.broadcast_play(root.play_text); } }
+            }
+        }
+        if root.width >= 640px: HorizontalLayout {
             spacing: 8px;
-            Text { text: "Broadcast message:"; }
-            LineEdit { text <=> root.broadcast_text; horizontal-stretch: 1; }
-            Button {
+            SectionLabel { text: "Broadcast"; }
+            TextInput { text <=> root.broadcast_text; }
+            ActionButton {
                 text: "Broadcast";
                 clicked => { root.broadcast_message(root.broadcast_text); }
             }
-            Button {
-                text: "Broadcast Play";
+            ActionButton {
+                text: "Play Remotely";
                 clicked => { root.broadcast_play(root.play_text); }
             }
         }
 
-        HorizontalLayout {
+        if root.width < 640px: VerticalLayout {
+            spacing: 6px;
+            SectionLabel { text: "Upload"; }
+            ActionButton {
+                text: "Choose File";
+                clicked => { root.choose_file(); }
+            }
+            TextInput { text <=> root.upload_name_text; placeholder-text: "remote name"; }
+            ActionButton {
+                text: "Upload";
+                clicked => { root.upload_file(root.upload_name_text); }
+            }
+        }
+        if root.width >= 640px: HorizontalLayout {
             spacing: 8px;
-            Button { text: "Choose File"; clicked => { root.choose_file(); } }
-            Text { text: "Remote name:"; }
-            LineEdit { text <=> root.upload_name_text; horizontal-stretch: 1; }
-            Button {
+            SectionLabel { text: "Upload"; }
+            ActionButton { text: "Choose File"; clicked => { root.choose_file(); } }
+            TextInput { text <=> root.upload_name_text; }
+            ActionButton {
                 text: "Upload";
                 clicked => { root.upload_file(root.upload_name_text); }
             }

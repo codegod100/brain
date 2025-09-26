@@ -1,0 +1,21 @@
+{
+  "name": "slintclient-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "predev": "wasm-pack build --target web",
+    "dev": "vite",
+    "prebuild": "wasm-pack build --target web",
+    "build": "vite build",
+    "preview": "vite preview",
+    "note": "Deprecated in favor of cmd/webui (Tailwind TS)"
+  },
+  "dependencies": {
+    "capnweb": "0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "vite": "^5.4.0"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": false,
+    "allowJs": false,
+    "jsx": "preserve",
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "types": ["dom"],
+    "baseUrl": "."
+  },
+  "include": ["web/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
