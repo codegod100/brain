@@ -155,12 +155,30 @@ class HubClient extends RpcTarget {
 }
 
 const state = {
-  host: determineHost(),
+  host: normalizeWsUrl(determineHost()) ?? determineHost(),
   client: new HubClient(),
 };
 
 export function setHost(url: string) {
-  state.host = url;
+  const normalized = normalizeWsUrl(url) ?? state.host;
+  const changed = normalized !== state.host;
+  state.host = normalized;
+  if (!changed) {
+    return;
+  }
+
+  if (api && typeof (api as { close?: () => void }).close === 'function') {
+    try {
+      (api as { close: () => void }).close();
+    } catch (error) {
+      logLine(`${LOG_PREFIX} failed to close previous session: ${String(error)}`);
+    }
+  }
+  api = null;
+  descriptor = null;
+  connected = false;
+  setStatus('Status: disconnected');
+  logLine(`${LOG_PREFIX} host set to ${state.host}`);
 }
 
 async function ensureConnection(): Promise<boolean> {
@@ -380,6 +398,29 @@ function formatBytes(bytes: number): string {
     unitIndex += 1;
   }
   return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function normalizeWsUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      parsed.protocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+    }
+    if (parsed.protocol !== 'ws:' && parsed.protocol !== 'wss:') {
+      return trimmed;
+    }
+    return parsed.toString();
+  } catch {
+    try {
+      const parsed = new URL(`ws://${trimmed.replace(/^\/*/, '')}`);
+      return parsed.toString();
+    } catch {
+      return trimmed;
+    }
+  }
 }
 
 function getBenchmarkSummaryFromResponse(resp: unknown): BenchmarkSummary | null {
