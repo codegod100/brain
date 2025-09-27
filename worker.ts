@@ -1,14 +1,5 @@
-import { Buffer } from "node:buffer";
+import { Buffer, type BufferEncoding } from "node:buffer";
 import { RpcStub, RpcTarget, newWebSocketRpcSession } from "capnweb";
-
-const PROJECT_FILES = [
-    ".gitignore",
-    "client.ts",
-    "package.json",
-    "pnpm-lock.yaml",
-    "worker.ts",
-    "wrangler.jsonc",
-];
 
 const CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
@@ -73,6 +64,114 @@ type BenchmarkSummary = {
     message: string;
 };
 
+type MapReduceReducer = "collect" | "sum" | "average" | "concat" | "count" | "merge";
+
+type MapReduceTaskDescriptor = {
+    taskId: string;
+    payload: unknown;
+    metadata?: Record<string, unknown> | null;
+};
+
+type MapReduceTaskState = MapReduceTaskDescriptor & {
+    assignedTo?: string;
+    assignedAt?: number;
+    attempts: number;
+    completedAt?: number;
+    result?: unknown;
+    error?: string;
+    resultMetadata?: unknown;
+};
+
+type MapReduceResultEntry = {
+    taskId: string;
+    assignedTo?: string;
+    attempts: number;
+    durationMs?: number;
+    result?: unknown;
+    error?: string;
+    metadata?: unknown;
+};
+
+type PendingMapReduce = {
+    requestId: string;
+    requesterId: string | null;
+    createdAt: number;
+    timeoutMs: number;
+    reducer: MapReduceReducer;
+    tasks: MapReduceTaskState[];
+    resolve: (summary: MapReduceSummary) => void;
+    timeoutHandle: ReturnType<typeof setTimeout>;
+    nextClientIndex: number;
+};
+
+type MapReduceSummary = {
+    command: "mapreduce";
+    requestId: string;
+    requesterId: string | null;
+    reducer: MapReduceReducer;
+    startedAt: string;
+    completedAt: string;
+    durationMs: number;
+    totalTasks: number;
+    completedTasks: number;
+    failedTasks: number;
+    pendingTasks: number;
+    results: MapReduceResultEntry[];
+    reducedValue: unknown;
+    message: string;
+};
+
+function decodeMaybeBase64ToString(raw: string): string {
+    const trimmed = raw.trim();
+    let normalized = trimmed;
+    let forced = false;
+    if (normalized.startsWith("base64:")) {
+        normalized = normalized.slice(7);
+        forced = true;
+    } else if (normalized.startsWith("b64:")) {
+        normalized = normalized.slice(4);
+        forced = true;
+    }
+
+    const base64Pattern = /^[A-Za-z0-9+/=_-]+$/;
+    if (
+        !forced &&
+        (!base64Pattern.test(normalized) || (normalized.length % 4 !== 0 && !normalized.includes("=")))
+    ) {
+        return trimmed;
+    }
+
+    const needsPadding = normalized.length % 4;
+    const padded = needsPadding ? normalized + "=".repeat(4 - needsPadding) : normalized;
+    const encoding: BufferEncoding = normalized.includes("-") || normalized.includes("_") ? "base64url" : "base64";
+
+    try {
+        const decoded = Buffer.from(padded, encoding).toString("utf8");
+        if (!forced) {
+            const nonPrintable = decoded.replace(/[\x20-\x7E\r\n\t]/g, "");
+            if (nonPrintable.length > 0) {
+                return trimmed;
+            }
+        }
+        if (!forced && decoded.trim().length === 0) {
+            return trimmed;
+        }
+        return decoded;
+    } catch (error) {
+        // Not base64; return original string.
+        return trimmed;
+    }
+}
+
+function parseMaybeJson(value: string): unknown {
+    const text = decodeMaybeBase64ToString(value);
+    try {
+        return JSON.parse(text);
+    } catch (error) {
+        return text;
+    }
+}
+
 function isClientInfo(value: unknown): value is ClientInfo {
     if (!value || typeof value !== "object") return false;
     const candidate = value as Record<string, unknown>;
@@ -105,10 +204,11 @@ class HubApi extends RpcTarget {
         "benchmark",
         "broadcast",
         "audio",
+        "mapreduce",
     ] as const;
-    private readonly files = [...PROJECT_FILES];
     private state?: DurableObjectState;
     private pendingBenchmarks = new Map<string, PendingBenchmark>();
+    private pendingMapReduces = new Map<string, PendingMapReduce>();
 
     async addClient(stub: RpcStub<ClientCallback>, rawInfo: unknown) {
         if (!isClientInfo(rawInfo)) {
@@ -181,6 +281,7 @@ class HubApi extends RpcTarget {
                 total: this.clients.length,
             }).catch((error) => console.error("Failed to broadcast leave", error));
             this.handleBenchmarkDeparture(record.info.id);
+            this.handleMapReduceDeparture(record.info.id);
         }
         console.log(`Remaining clients: ${this.clients.length}`);
     }
@@ -901,12 +1002,587 @@ class HubApi extends RpcTarget {
                         };
                     }
                 }
+            case "mapreduce":
+                return await this.handleMapReduceCommand(parts.slice(1), clientId);
             default:
                 return {
                     command: cmd,
                     error: `Unknown command: ${cmd}`,
                     available: this.listCommands(),
                 };
+        }
+    }
+
+    private async handleMapReduceCommand(tokens: string[], clientId?: string) {
+        if (tokens.length === 0) {
+            return {
+                command: "mapreduce",
+                error: "Usage: mapreduce <start|report|status|cancel> ...",
+                examples: [
+                    "mapreduce start tasks=<base64-json>",
+                    "mapreduce report <requestId> <taskId> <base64-result>",
+                    "mapreduce status <requestId>",
+                ],
+            };
+        }
+
+        const subcommand = tokens[0]?.toLowerCase();
+        if (subcommand === "report") {
+            return this.handleMapReduceReport(tokens.slice(1), clientId);
+        }
+        if (subcommand === "status") {
+            return this.handleMapReduceStatus(tokens.slice(1));
+        }
+        if (subcommand === "cancel") {
+            return this.handleMapReduceCancel(tokens.slice(1), clientId);
+        }
+
+        const startTokens = subcommand === "start" || subcommand === "run" ? tokens.slice(1) : tokens;
+        return await this.startMapReduce(startTokens, clientId);
+    }
+
+    private parsePositiveInt(value: string | undefined, fallback: number) {
+        if (!value) {
+            return fallback;
+        }
+        const parsed = Number.parseInt(value, 10);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+    }
+
+    private normalizeReducer(raw: string | undefined): MapReduceReducer {
+        const value = (raw ?? "collect").toLowerCase();
+        if (["sum", "add", "total"].includes(value)) {
+            return "sum";
+        }
+        if (["avg", "average", "mean"].includes(value)) {
+            return "average";
+        }
+        if (["concat", "join", "string"].includes(value)) {
+            return "concat";
+        }
+        if (["count", "len", "length"].includes(value)) {
+            return "count";
+        }
+        if (["merge", "object", "combine"].includes(value)) {
+            return "merge";
+        }
+        return "collect";
+    }
+
+    private normalizeMapReduceTasks(source: unknown): MapReduceTaskDescriptor[] {
+        if (!source) {
+            return [];
+        }
+
+        const result: MapReduceTaskDescriptor[] = [];
+
+        if (Array.isArray(source)) {
+            source.forEach((entry, index) => {
+                if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+                    const candidate = entry as Record<string, unknown>;
+                    const taskId =
+                        typeof candidate.taskId === "string"
+                            ? candidate.taskId
+                            : typeof candidate.id === "string"
+                            ? candidate.id
+                            : `task-${index + 1}`;
+                    const { payload, value, data, taskId: _taskId, id: _id, metadata: rawMeta, ...rest } = candidate;
+                    const payloadValue = payload ?? value ?? data ?? rest;
+                    const metadata =
+                        rawMeta && typeof rawMeta === "object"
+                            ? (rawMeta as Record<string, unknown>)
+                            : null;
+                    result.push({
+                        taskId,
+                        payload: payloadValue,
+                        metadata,
+                    });
+                } else {
+                    result.push({
+                        taskId: `task-${index + 1}`,
+                        payload: entry,
+                    });
+                }
+            });
+            return result;
+        }
+
+        if (typeof source === "object") {
+            const candidate = source as Record<string, unknown>;
+            if (Array.isArray(candidate.tasks)) {
+                return this.normalizeMapReduceTasks(candidate.tasks);
+            }
+            for (const [key, value] of Object.entries(candidate)) {
+                if (key === "metadata" || key === "config") continue;
+                result.push({ taskId: String(key), payload: value });
+            }
+            return result;
+        }
+
+        return [];
+    }
+
+    private async startMapReduce(tokens: string[], clientId?: string): Promise<MapReduceSummary | { command: string; error: string; }> {
+        const participants = [...this.clients];
+        if (participants.length === 0) {
+            return {
+                command: "mapreduce",
+                error: "No connected clients available for map/reduce",
+            };
+        }
+
+        let encodedTasks: string | undefined;
+        const options = new Map<string, string>();
+
+        for (const token of tokens) {
+            if (!token) continue;
+            const eqIndex = token.indexOf("=");
+            if (eqIndex === -1) {
+                if (!encodedTasks) {
+                    encodedTasks = token;
+                }
+                continue;
+            }
+            const key = token.slice(0, eqIndex).toLowerCase();
+            const value = token.slice(eqIndex + 1);
+            if (["tasks", "data", "work"].includes(key)) {
+                encodedTasks = value;
+            } else {
+                options.set(key, value);
+            }
+        }
+
+        if (!encodedTasks) {
+            return {
+                command: "mapreduce",
+                error: "No tasks supplied. Use tasks=<json-or-base64>",
+            };
+        }
+
+        const parsedSource = parseMaybeJson(encodedTasks);
+        const taskDescriptors = this.normalizeMapReduceTasks(parsedSource);
+        if (taskDescriptors.length === 0) {
+            return {
+                command: "mapreduce",
+                error: "No tasks could be parsed from the provided payload",
+            };
+        }
+
+        const reducer = this.normalizeReducer(options.get("reducer") ?? options.get("reduce"));
+        const timeoutMs = this.parsePositiveInt(options.get("timeout") ?? options.get("timeoutms"), 15_000);
+
+        const requestId = randomRequestId();
+        const createdAt = Date.now();
+
+        let resolveSummary!: (summary: MapReduceSummary) => void;
+        const summaryPromise = new Promise<MapReduceSummary>((resolve) => {
+            resolveSummary = resolve;
+        });
+
+        const timeoutHandle = setTimeout(() => {
+            this.resolveMapReduce(requestId, "MapReduce timed out before all tasks completed");
+        }, timeoutMs);
+
+        const pending: PendingMapReduce = {
+            requestId,
+            requesterId: clientId ?? null,
+            createdAt,
+            timeoutMs,
+            reducer,
+            tasks: taskDescriptors.map((descriptor) => ({
+                ...descriptor,
+                attempts: 0,
+            })),
+            resolve: resolveSummary,
+            timeoutHandle,
+            nextClientIndex: 0,
+        };
+
+        this.pendingMapReduces.set(requestId, pending);
+
+        console.log(
+            `Starting map/reduce request ${requestId} with ${pending.tasks.length} task(s) across ${participants.length} client(s)`,
+        );
+
+        for (const task of pending.tasks) {
+            const dispatched = await this.dispatchMapReduceTask(pending, task);
+            if (!dispatched) {
+                task.error = "Failed to dispatch task to any client";
+                task.completedAt = Date.now();
+            }
+        }
+
+        this.checkMapReduceCompletion(requestId);
+
+        return await summaryPromise;
+    }
+
+    private handleMapReduceReport(tokens: string[], clientId?: string) {
+        if (tokens.length < 2) {
+            return {
+                command: "mapreduce-report",
+                error: "Usage: mapreduce report <requestId> <taskId> [<result>|result=<value>] [error=<message>] [metadata=<json>]",
+            };
+        }
+
+        const [requestId, taskId] = tokens;
+        const pending = this.pendingMapReduces.get(requestId);
+        if (!pending) {
+            return {
+                command: "mapreduce-report",
+                requestId,
+                taskId,
+                accepted: false,
+                error: "Unknown mapreduce request",
+            };
+        }
+
+        let encodedResult: string | undefined;
+        let errorMessage: string | undefined;
+        let metadata: unknown = undefined;
+
+        for (let i = 2; i < tokens.length; i += 1) {
+            const token = tokens[i];
+            if (!token) continue;
+            const eqIndex = token.indexOf("=");
+            if (eqIndex === -1 && encodedResult === undefined) {
+                encodedResult = token;
+                continue;
+            }
+            if (eqIndex !== -1) {
+                const key = token.slice(0, eqIndex).toLowerCase();
+                const value = token.slice(eqIndex + 1);
+                if ((key === "result" || key === "value") && encodedResult === undefined) {
+                    encodedResult = value;
+                } else if (key === "error") {
+                    errorMessage = decodeMaybeBase64ToString(value);
+                } else if (key === "metadata") {
+                    metadata = parseMaybeJson(value);
+                }
+            }
+        }
+
+        if (!encodedResult && !errorMessage) {
+            encodedResult = "null";
+        }
+
+        const task = pending.tasks.find((item) => item.taskId === taskId);
+        if (!task) {
+            return {
+                command: "mapreduce-report",
+                requestId,
+                taskId,
+                accepted: false,
+                error: "Unknown task identifier",
+            };
+        }
+
+        if (task.completedAt) {
+            return {
+                command: "mapreduce-report",
+                requestId,
+                taskId,
+                accepted: false,
+                error: "Task already reported",
+            };
+        }
+
+        if (clientId && task.assignedTo && task.assignedTo !== clientId) {
+            console.warn(
+                `MapReduce task ${taskId} for request ${requestId} reported by unexpected client ${clientId}; expected ${task.assignedTo}`,
+            );
+        }
+
+        const completedAt = Date.now();
+        task.completedAt = completedAt;
+        if (errorMessage) {
+            task.error = errorMessage;
+            task.result = undefined;
+        } else if (encodedResult !== undefined) {
+            const parsed = parseMaybeJson(encodedResult);
+            task.result = parsed;
+        }
+        if (metadata !== undefined) {
+            task.resultMetadata = metadata;
+        }
+
+        const acceptedResponse = {
+            command: "mapreduce-report",
+            requestId,
+            taskId,
+            accepted: true,
+        };
+
+        this.checkMapReduceCompletion(requestId);
+
+        return acceptedResponse;
+    }
+
+    private handleMapReduceStatus(tokens: string[]) {
+        if (tokens.length < 1) {
+            return {
+                command: "mapreduce-status",
+                error: "Usage: mapreduce status <requestId>",
+            };
+        }
+
+        const [requestId] = tokens;
+        const pending = this.pendingMapReduces.get(requestId);
+        if (!pending) {
+            return {
+                command: "mapreduce-status",
+                requestId,
+                active: false,
+            };
+        }
+
+        const snapshot = {
+            command: "mapreduce-status",
+            requestId,
+            active: true,
+            reducer: pending.reducer,
+            requesterId: pending.requesterId,
+            startedAt: new Date(pending.createdAt).toISOString(),
+            timeoutAt: new Date(pending.createdAt + pending.timeoutMs).toISOString(),
+            totalTasks: pending.tasks.length,
+            completedTasks: pending.tasks.filter((task) => task.completedAt).length,
+            failedTasks: pending.tasks.filter((task) => task.error).length,
+            results: pending.tasks.map<MapReduceResultEntry>((task) => ({
+                taskId: task.taskId,
+                assignedTo: task.assignedTo,
+                attempts: task.attempts,
+                durationMs:
+                    task.completedAt && task.assignedAt ? task.completedAt - task.assignedAt : undefined,
+                result: task.error ? undefined : task.result,
+                error: task.error,
+                metadata: task.resultMetadata,
+            })),
+        };
+
+        return snapshot;
+    }
+
+    private handleMapReduceCancel(tokens: string[], clientId?: string) {
+        if (tokens.length < 1) {
+            return {
+                command: "mapreduce-cancel",
+                error: "Usage: mapreduce cancel <requestId>",
+            };
+        }
+
+        const [requestId] = tokens;
+        const pending = this.pendingMapReduces.get(requestId);
+        if (!pending) {
+            return {
+                command: "mapreduce-cancel",
+                requestId,
+                cancelled: false,
+                error: "Unknown mapreduce request",
+            };
+        }
+
+        const actor = clientId ? ` by ${clientId}` : "";
+        this.resolveMapReduce(requestId, `MapReduce cancelled${actor}`);
+
+        return {
+            command: "mapreduce-cancel",
+            requestId,
+            cancelled: true,
+        };
+    }
+
+    private async dispatchMapReduceTask(pending: PendingMapReduce, task: MapReduceTaskState): Promise<boolean> {
+        const participants = [...this.clients];
+        if (participants.length === 0) {
+            return false;
+        }
+
+        const startIndex = pending.nextClientIndex % participants.length;
+        for (let offset = 0; offset < participants.length; offset += 1) {
+            const candidate = participants[(startIndex + offset) % participants.length];
+            try {
+                await candidate.stub.broadcast({
+                    type: "mapreduce-task",
+                    requestId: pending.requestId,
+                    taskId: task.taskId,
+                    payload: task.payload,
+                    metadata: task.metadata ?? null,
+                    reducer: pending.reducer,
+                    totalTasks: pending.tasks.length,
+                    timeoutMs: pending.timeoutMs,
+                    attempts: task.attempts + 1,
+                });
+                task.assignedTo = candidate.info.id;
+                task.assignedAt = Date.now();
+                task.attempts += 1;
+
+                const clientCount = this.clients.length;
+                if (clientCount === 0) {
+                    pending.nextClientIndex = 0;
+                } else {
+                    const indexInClients = this.clients.findIndex((entry) => entry.info.id === candidate.info.id);
+                    pending.nextClientIndex = indexInClients === -1 ? 0 : (indexInClients + 1) % clientCount;
+                }
+
+                return true;
+            } catch (error) {
+                console.error(
+                    `Failed to dispatch mapreduce task ${task.taskId} to client ${candidate.info.id}: ${error instanceof Error ? error.message : String(error)}`,
+                );
+                this.removeClient(candidate.stub);
+            }
+        }
+
+        return false;
+    }
+
+    private handleMapReduceDeparture(clientId: string) {
+        for (const pending of this.pendingMapReduces.values()) {
+            for (const task of pending.tasks) {
+                if (!task.completedAt && task.assignedTo === clientId) {
+                    task.assignedTo = undefined;
+                    task.assignedAt = undefined;
+                    setTimeout(() => {
+                        if (!this.pendingMapReduces.has(pending.requestId)) {
+                            return;
+                        }
+                        void this.dispatchMapReduceTask(pending, task).then((dispatched) => {
+                            if (!dispatched) {
+                                task.error = task.error ?? "Failed to reassign after client departure";
+                                task.completedAt = Date.now();
+                                this.checkMapReduceCompletion(pending.requestId);
+                            }
+                        });
+                    }, 0);
+                }
+            }
+        }
+    }
+
+    private checkMapReduceCompletion(requestId: string) {
+        const pending = this.pendingMapReduces.get(requestId);
+        if (!pending) {
+            return;
+        }
+
+        const allDone = pending.tasks.every((task) => task.completedAt);
+        if (allDone) {
+            this.resolveMapReduce(requestId);
+        }
+    }
+
+    private resolveMapReduce(requestId: string, message?: string) {
+        const pending = this.pendingMapReduces.get(requestId);
+        if (!pending) {
+            return;
+        }
+
+        clearTimeout(pending.timeoutHandle);
+        this.pendingMapReduces.delete(requestId);
+
+        const completedAt = Date.now();
+        const unfinished = pending.tasks.filter((task) => !task.completedAt);
+        for (const task of unfinished) {
+            task.completedAt = completedAt;
+            task.error = task.error ?? "No response received";
+        }
+
+        const results: MapReduceResultEntry[] = pending.tasks.map((task) => ({
+            taskId: task.taskId,
+            assignedTo: task.assignedTo,
+            attempts: task.attempts,
+            durationMs: task.completedAt && task.assignedAt ? task.completedAt - task.assignedAt : undefined,
+            result: task.error ? undefined : task.result,
+            error: task.error,
+            metadata: task.resultMetadata,
+        }));
+
+        const successfulResults = pending.tasks
+            .filter((task) => task.completedAt && !task.error)
+            .map((task) => task.result);
+
+        const reducedValue = this.reduceMapReduceResults(pending.reducer, successfulResults);
+
+        const totalTasks = pending.tasks.length;
+        const completedTasks = pending.tasks.filter((task) => task.completedAt).length;
+        const failedTasks = pending.tasks.filter((task) => task.error).length;
+        const pendingTasks = unfinished.length;
+
+        const summary: MapReduceSummary = {
+            command: "mapreduce",
+            requestId,
+            requesterId: pending.requesterId,
+            reducer: pending.reducer,
+            startedAt: new Date(pending.createdAt).toISOString(),
+            completedAt: new Date(completedAt).toISOString(),
+            durationMs: completedAt - pending.createdAt,
+            totalTasks,
+            completedTasks,
+            failedTasks,
+            pendingTasks,
+            results,
+            reducedValue,
+            message:
+                message ??
+                (failedTasks === 0 && pendingTasks === 0
+                    ? "MapReduce completed successfully"
+                    : failedTasks > 0
+                    ? "MapReduce completed with errors"
+                    : "MapReduce completed with pending tasks"),
+        };
+
+        pending.resolve(summary);
+    }
+
+    private reduceMapReduceResults(reducer: MapReduceReducer, results: unknown[]): unknown {
+        switch (reducer) {
+            case "sum": {
+                const numbers = results
+                    .map((value) => {
+                        if (typeof value === "number") return value;
+                        if (typeof value === "string") {
+                            const parsed = Number.parseFloat(value);
+                            return Number.isFinite(parsed) ? parsed : null;
+                        }
+                        return null;
+                    })
+                    .filter((value): value is number => value !== null);
+                return numbers.reduce((total, value) => total + value, 0);
+            }
+            case "average": {
+                const numbers = results
+                    .map((value) => {
+                        if (typeof value === "number") return value;
+                        if (typeof value === "string") {
+                            const parsed = Number.parseFloat(value);
+                            return Number.isFinite(parsed) ? parsed : null;
+                        }
+                        return null;
+                    })
+                    .filter((value): value is number => value !== null);
+                if (numbers.length === 0) {
+                    return 0;
+                }
+                const total = numbers.reduce((sum, value) => sum + value, 0);
+                return total / numbers.length;
+            }
+            case "concat": {
+                return results.map((value) => (value === undefined || value === null ? "" : String(value))).join("");
+            }
+            case "count":
+                return results.length;
+            case "merge": {
+                const merged: Record<string, unknown> = {};
+                for (const value of results) {
+                    if (value && typeof value === "object" && !Array.isArray(value)) {
+                        Object.assign(merged, value as Record<string, unknown>);
+                    }
+                }
+                return merged;
+            }
+            case "collect":
+            default:
+                return results;
         }
     }
 

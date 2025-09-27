@@ -94,6 +94,10 @@ class Client extends RpcTarget {
         });
         return;
       }
+      if (msg.type === "mapreduce-task") {
+        void handleMapReduceTask(msg);
+        return;
+      }
       try {
         console.log("Incoming message!\n" + JSON.stringify(message, null, 2));
       } catch (error) {
@@ -158,7 +162,7 @@ const client = new Client();
 const total = await api.addClient(client, descriptor);
 console.log(`Connected to: ${host}`);
 console.log(`Connected clients: ${total}`);
-console.log('Commands available: type "files" or "help"; "exit" to quit.');
+console.log('Commands available: type "help"; "exit" to quit.');
 
 let socketStarted = false;
 try {
@@ -230,6 +234,92 @@ async function respondToBenchmark(request: BenchmarkRequestPayload) {
   }
 }
 
+async function handleMapReduceTask(task: any) {
+  const { requestId, taskId, payload, metadata, reducer, totalTasks, timeoutMs, attempts } = task;
+  console.log(`🧮 Processing mapreduce task ${taskId} (${attempts} attempt${attempts !== 1 ? 's' : ''})`);
+  console.log(`   Request: ${requestId}, Reducer: ${reducer}, Total tasks: ${totalTasks}`);
+  console.log(`   Payload:`, payload);
+
+  const startTime = Date.now();
+
+  try {
+    // Transform the payload based on its type
+    let result: any;
+    
+    if (typeof payload === 'number') {
+      // For numbers: square the value and add some metadata
+      result = {
+        original: payload,
+        transformed: payload * payload,
+        operation: 'square',
+        nodeId: descriptor.id,
+        processedAt: new Date().toISOString(),
+        processingTimeMs: Date.now() - startTime
+      };
+    } else if (typeof payload === 'string') {
+      // For strings: reverse the string and convert to uppercase
+      result = {
+        original: payload,
+        transformed: payload.split('').reverse().join('').toUpperCase(),
+        operation: 'reverse_uppercase',
+        nodeId: descriptor.id,
+        processedAt: new Date().toISOString(),
+        processingTimeMs: Date.now() - startTime
+      };
+    } else if (Array.isArray(payload)) {
+      // For arrays: double each element if numeric, or get length if not
+      result = {
+        original: payload,
+        transformed: payload.map((item: any) => 
+          typeof item === 'number' ? item * 2 : String(item).length
+        ),
+        operation: 'array_transform',
+        nodeId: descriptor.id,
+        processedAt: new Date().toISOString(),
+        processingTimeMs: Date.now() - startTime
+      };
+    } else if (payload && typeof payload === 'object') {
+      // For objects: add a processed timestamp and node info
+      result = {
+        ...payload,
+        _processed: {
+          nodeId: descriptor.id,
+          processedAt: new Date().toISOString(),
+          processingTimeMs: Date.now() - startTime,
+          operation: 'object_enrichment'
+        }
+      };
+    } else {
+      // For other types: wrap with metadata
+      result = {
+        original: payload,
+        transformed: payload,
+        operation: 'passthrough',
+        nodeId: descriptor.id,
+        processedAt: new Date().toISOString(),
+        processingTimeMs: Date.now() - startTime
+      };
+    }
+    
+    // Report the result back to the hub
+    const reportCommand = `mapreduce report ${requestId} ${taskId} ${JSON.stringify(result)}`;
+    await api.runCommand(reportCommand, descriptor.id);
+    
+    console.log(`✅ Mapreduce task ${taskId} completed successfully in ${Date.now() - startTime}ms`);
+  } catch (error) {
+    console.error(`❌ Mapreduce task ${taskId} failed:`, error);
+    
+    // Report the error back to the hub
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const reportCommand = `mapreduce report ${requestId} ${taskId} error=${JSON.stringify(errorMessage)}`;
+    try {
+      await api.runCommand(reportCommand, descriptor.id);
+    } catch (reportError) {
+      console.error(`Failed to report mapreduce error:`, reportError);
+    }
+  }
+}
+
 // Audio playback function
 async function playAudio(url: string, filename: string) {
   console.log(`🎵 Downloading and playing: ${filename}`);
@@ -288,15 +378,6 @@ try {
   for await (const line of rl) {
     const command = line.trim();
     if (!command) {
-      continue;
-    }
-    if (command === "files") {
-      try {
-        const files = fs.readdirSync('.');
-        console.log("Local files:\n" + JSON.stringify(files, null, 2));
-      } catch (error) {
-        console.error("Failed to read files", error);
-      }
       continue;
     }
     if (command.startsWith("upload ")) {
@@ -420,11 +501,6 @@ async function getStatusPayload() {
     whoami,
     audioList,
   };
-}
-
-async function listFilesPayload() {
-  const files = await fs.promises.readdir(".");
-  return { files };
 }
 
 async function commandPayload(command: string) {
@@ -615,9 +691,6 @@ async function handleSocketRequest(socket: net.Socket, request: SocketRequest) {
     switch (type) {
       case "status":
         data = await getStatusPayload();
-        break;
-      case "files":
-        data = await listFilesPayload();
         break;
       case "command": {
         const command = typeof request.command === "string" ? request.command : undefined;
