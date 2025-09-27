@@ -37,12 +37,46 @@ type BenchmarkUpdate =
   | { kind: 'error'; error: string }
   | { kind: 'reset' };
 
+type MapReduceResultEntry = {
+  taskId: string;
+  assignedTo?: string;
+  attempts: number;
+  durationMs?: number;
+  result?: unknown;
+  error?: string;
+  metadata?: unknown;
+};
+
+type MapReduceSummary = {
+  command: 'mapreduce';
+  requestId: string;
+  requesterId: string | null;
+  reducer: string;
+  startedAt: string;
+  completedAt: string;
+  durationMs: number;
+  totalTasks: number;
+  completedTasks: number;
+  failedTasks: number;
+  pendingTasks: number;
+  results: MapReduceResultEntry[];
+  reducedValue: unknown;
+  message: string;
+};
+
+type MapReduceUpdate =
+  | { kind: 'summary'; summary: MapReduceSummary }
+  | { kind: 'status'; status: any }
+  | { kind: 'error'; error: string }
+  | { kind: 'reset' };
+
 export type UiBindings = {
   ui_append_log_line?: (line: string) => void;
   ui_set_status_text?: (text: string) => void;
   ui_set_log_lines?: (lines: string[]) => void;
   ui_set_audio_files?: (files: AudioItem[]) => void;
   ui_set_benchmark_result?: (update: BenchmarkUpdate) => void;
+  ui_set_mapreduce_result?: (update: MapReduceUpdate) => void;
 };
 
 type HubApi = {
@@ -151,6 +185,9 @@ class HubClient extends RpcTarget {
       const url = toHttpUrl(`/audio/${encodeURIComponent(filename)}`);
       playAudio(url);
     }
+    if (payload?.type === "mapreduce-task") {
+      void handleMapReduceTask(payload);
+    }
   }
 }
 
@@ -211,11 +248,15 @@ async function ensureConnection(): Promise<boolean> {
 async function callRunCommand(command: string, clientId: string | undefined = descriptor?.id ?? undefined): Promise<void> {
   const normalized = command.trim().toLowerCase();
   const isBenchmarkCommand = normalized.startsWith('benchmark') && !normalized.startsWith('benchmark report');
+  const isMapReduceCommand = normalized.startsWith('mapreduce') && !normalized.startsWith('mapreduce report');
   if (!api) await ensureConnection();
   if (!api) {
     logLine(`${LOG_PREFIX} cannot send command; not connected`);
     if (isBenchmarkCommand) {
       ui?.ui_set_benchmark_result?.({ kind: 'error', error: 'Not connected to hub' });
+    }
+    if (isMapReduceCommand) {
+      ui?.ui_set_mapreduce_result?.({ kind: 'error', error: 'Not connected to hub' });
     }
     return;
   }
@@ -235,10 +276,23 @@ async function callRunCommand(command: string, clientId: string | undefined = de
         ui?.ui_set_benchmark_result?.({ kind: 'error', error });
       }
     }
+
+    const mapReduceSummary = getMapReduceSummaryFromResponse(response);
+    if (mapReduceSummary) {
+      ui?.ui_set_mapreduce_result?.({ kind: 'summary', summary: mapReduceSummary });
+    } else if (isMapReduceCommand && !normalized.startsWith('mapreduce status')) {
+      const error = getMapReduceErrorFromResponse(response);
+      if (error) {
+        ui?.ui_set_mapreduce_result?.({ kind: 'error', error });
+      }
+    }
   } catch (error) {
     logLine(`${LOG_PREFIX} command error: ${String(error)}`);
     if (isBenchmarkCommand) {
       ui?.ui_set_benchmark_result?.({ kind: 'error', error: String(error) });
+    }
+    if (isMapReduceCommand) {
+      ui?.ui_set_mapreduce_result?.({ kind: 'error', error: String(error) });
     }
   }
 }
@@ -300,6 +354,21 @@ export const clientApi = {
       return;
     }
     void callRunCommand('benchmark');
+  },
+  runMapReduce(tasks: string, reducer?: string): void {
+    // Base64 encode the tasks to avoid command parsing issues with spaces and special characters
+    const encodedTasks = btoa(unescape(encodeURIComponent(tasks)));
+    let command = `mapreduce start tasks=${encodedTasks}`;
+    if (reducer && reducer.trim()) {
+      command += ` reducer=${reducer.trim()}`;
+    }
+    void callRunCommand(command);
+  },
+  checkMapReduceStatus(requestId: string): void {
+    void callRunCommand(`mapreduce status ${requestId}`);
+  },
+  cancelMapReduce(requestId: string): void {
+    void callRunCommand(`mapreduce cancel ${requestId}`);
   },
   async uploadAudioFile(file: File, name?: string): Promise<{ filename: string; size: number; contentType?: string }> {
     if (!file) {
@@ -439,6 +508,22 @@ function getBenchmarkErrorFromResponse(resp: unknown): string | null {
   return null;
 }
 
+function getMapReduceSummaryFromResponse(resp: unknown): MapReduceSummary | null {
+  if (!resp || typeof resp !== 'object') return null;
+  const candidate = resp as Record<string, unknown>;
+  if (candidate.command !== 'mapreduce') return null;
+  if (!Array.isArray(candidate.results)) return null;
+  return candidate as MapReduceSummary;
+}
+
+function getMapReduceErrorFromResponse(resp: unknown): string | null {
+  if (!resp || typeof resp !== 'object') return null;
+  const candidate = resp as Record<string, unknown>;
+  if (candidate.command !== 'mapreduce') return null;
+  if (typeof candidate.error === 'string') return candidate.error;
+  return null;
+}
+
 async function handleBenchmarkRequest(request: BenchmarkRequestMessage): Promise<void> {
   const defaultIterations = 50_000;
   const maxIterations = 5_000_000;
@@ -477,6 +562,91 @@ async function handleBenchmarkRequest(request: BenchmarkRequestMessage): Promise
     );
   } catch (error) {
     logLine(`${logLabel} failed to report: ${String(error)}`);
+  }
+}
+
+async function handleMapReduceTask(task: any): Promise<void> {
+  const { requestId, taskId, payload, metadata, reducer, totalTasks, timeoutMs, attempts } = task;
+  logLine(`${LOG_PREFIX} processing mapreduce task ${taskId} (${attempts} attempt${attempts !== 1 ? 's' : ''})`);
+  logLine(`${LOG_PREFIX} task payload: ${safeJson(payload)}`);
+
+  const startTime = performance.now();
+
+  try {
+    // Transform the payload based on its type
+    let result: any;
+
+    if (typeof payload === 'number') {
+      // For numbers: square the value and add some metadata
+      result = {
+        original: payload,
+        transformed: payload * payload,
+        operation: 'square',
+        nodeId: descriptor?.id ?? 'webui',
+        processedAt: new Date().toISOString(),
+        processingTimeMs: performance.now() - startTime
+      };
+    } else if (typeof payload === 'string') {
+      // For strings: reverse the string and convert to uppercase
+      result = {
+        original: payload,
+        transformed: payload.split('').reverse().join('').toUpperCase(),
+        operation: 'reverse_uppercase',
+        nodeId: descriptor?.id ?? 'webui',
+        processedAt: new Date().toISOString(),
+        processingTimeMs: performance.now() - startTime
+      };
+    } else if (Array.isArray(payload)) {
+      // For arrays: double each element if numeric, or get length if not
+      result = {
+        original: payload,
+        transformed: payload.map((item: any) =>
+          typeof item === 'number' ? item * 2 : String(item).length
+        ),
+        operation: 'array_transform',
+        nodeId: descriptor?.id ?? 'webui',
+        processedAt: new Date().toISOString(),
+        processingTimeMs: performance.now() - startTime
+      };
+    } else if (payload && typeof payload === 'object') {
+      // For objects: add a processed timestamp and node info
+      result = {
+        ...payload,
+        _processed: {
+          nodeId: descriptor?.id ?? 'webui',
+          processedAt: new Date().toISOString(),
+          processingTimeMs: performance.now() - startTime,
+          operation: 'object_enrichment'
+        }
+      };
+    } else {
+      // For other types: wrap with metadata
+      result = {
+        original: payload,
+        transformed: payload,
+        operation: 'passthrough',
+        nodeId: descriptor?.id ?? 'webui',
+        processedAt: new Date().toISOString(),
+        processingTimeMs: performance.now() - startTime
+      };
+    }
+
+    // Report the result back to the hub
+    const reportCommand = `mapreduce report ${requestId} ${taskId} ${JSON.stringify(result)}`;
+    await callRunCommand(reportCommand);
+
+    logLine(`${LOG_PREFIX} mapreduce task ${taskId} completed successfully in ${(performance.now() - startTime).toFixed(2)}ms`);
+  } catch (error) {
+    logLine(`${LOG_PREFIX} mapreduce task ${taskId} failed: ${String(error)}`);
+
+    // Report the error back to the hub
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const reportCommand = `mapreduce report ${requestId} ${taskId} error=${JSON.stringify(errorMessage)}`;
+    try {
+      await callRunCommand(reportCommand);
+    } catch (reportError) {
+      logLine(`${LOG_PREFIX} failed to report mapreduce error: ${String(reportError)}`);
+    }
   }
 }
 

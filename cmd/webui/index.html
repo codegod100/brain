@@ -102,6 +102,60 @@
           </div>
         </div>
       </section>
+
+      <section class="mb-6">
+        <div class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <div class="mb-3 flex items-center justify-between">
+            <h2 class="text-lg font-medium">MapReduce</h2>
+            <button id="runMapReduce" class="rounded bg-orange-600 px-3 py-2 text-sm font-medium text-white hover:bg-orange-700">Run MapReduce</button>
+          </div>
+          <div class="mb-4 grid gap-4 md:grid-cols-2">
+            <div>
+              <label class="mb-2 block text-sm font-medium text-slate-700" for="mapReduceTasks">Tasks (JSON array)</label>
+              <textarea id="mapReduceTasks" rows="4" class="w-full rounded border border-slate-300 px-3 py-2 text-sm" placeholder='[{"data": 5}, {"data": "hello"}, {"data": [1, 2, 3]}]'></textarea>
+            </div>
+            <div>
+              <label class="mb-2 block text-sm font-medium text-slate-700" for="mapReduceReducer">Reducer</label>
+              <select id="mapReduceReducer" class="w-full rounded border border-slate-300 px-3 py-2 text-sm">
+                <option value="collect">collect</option>
+                <option value="sum">sum</option>
+                <option value="average">average</option>
+                <option value="concat">concat</option>
+                <option value="count">count</option>
+                <option value="merge">merge</option>
+              </select>
+              <div class="mt-4">
+                <label class="mb-2 block text-sm font-medium text-slate-700" for="mapReduceRequestId">Request ID (for status/cancel)</label>
+                <div class="flex gap-2">
+                  <input id="mapReduceRequestId" class="flex-1 rounded border border-slate-300 px-3 py-2 text-sm" placeholder="request-id" />
+                  <button id="checkMapReduceStatus" class="rounded bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-700">Check Status</button>
+                  <button id="cancelMapReduce" class="rounded bg-red-600 px-3 py-2 text-sm text-white hover:bg-red-700">Cancel</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div id="mapReduceSummary" class="text-sm text-slate-600">No mapreduce results yet.</div>
+          <div class="mt-4 overflow-x-auto">
+            <table class="min-w-full divide-y divide-slate-200 text-left text-xs">
+              <thead class="bg-slate-100 text-slate-600">
+                <tr>
+                  <th scope="col" class="px-3 py-2 font-medium">Task ID</th>
+                  <th scope="col" class="px-3 py-2 font-medium">Node</th>
+                  <th scope="col" class="px-3 py-2 font-medium">Attempts</th>
+                  <th scope="col" class="px-3 py-2 font-medium">Duration (ms)</th>
+                  <th scope="col" class="px-3 py-2 font-medium">Result</th>
+                  <th scope="col" class="px-3 py-2 font-medium">Processed</th>
+                </tr>
+              </thead>
+              <tbody id="mapReduceTableBody" class="divide-y divide-slate-200">
+                <tr>
+                  <td colspan="6" class="px-3 py-4 text-center text-slate-500">No mapreduce data</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
     </div>
 
     <script type="module" src="/src/main.ts"></script>

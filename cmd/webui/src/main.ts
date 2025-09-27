@@ -29,6 +29,15 @@ const audioFileNameInput = byId<HTMLInputElement>('audioFileName');
 const uploadAudioBtn = byId<HTMLButtonElement>('uploadAudio');
 const uploadStatusEl = byId<HTMLDivElement>('uploadStatus');
 
+const runMapReduceBtn = byId<HTMLButtonElement>('runMapReduce');
+const mapReduceTasksEl = byId<HTMLTextAreaElement>('mapReduceTasks');
+const mapReduceReducerEl = byId<HTMLSelectElement>('mapReduceReducer');
+const mapReduceRequestIdEl = byId<HTMLInputElement>('mapReduceRequestId');
+const checkMapReduceStatusBtn = byId<HTMLButtonElement>('checkMapReduceStatus');
+const cancelMapReduceBtn = byId<HTMLButtonElement>('cancelMapReduce');
+const mapReduceSummaryEl = byId<HTMLDivElement>('mapReduceSummary');
+const mapReduceTableBody = byId<HTMLTableSectionElement>('mapReduceTableBody');
+
 type BenchmarkResult = {
   clientId: string;
   durationMs: number;
@@ -59,6 +68,39 @@ type BenchmarkUpdate =
   | { kind: 'error'; error: string }
   | { kind: 'reset' };
 
+type MapReduceResultEntry = {
+  taskId: string;
+  assignedTo?: string;
+  attempts: number;
+  durationMs?: number;
+  result?: unknown;
+  error?: string;
+  metadata?: unknown;
+};
+
+type MapReduceSummary = {
+  command: 'mapreduce';
+  requestId: string;
+  requesterId: string | null;
+  reducer: string;
+  startedAt: string;
+  completedAt: string;
+  durationMs: number;
+  totalTasks: number;
+  completedTasks: number;
+  failedTasks: number;
+  pendingTasks: number;
+  results: MapReduceResultEntry[];
+  reducedValue: unknown;
+  message: string;
+};
+
+type MapReduceUpdate =
+  | { kind: 'summary'; summary: MapReduceSummary }
+  | { kind: 'status'; status: any }
+  | { kind: 'error'; error: string }
+  | { kind: 'reset' };
+
 let shouldAutoScroll = true;
 let latestBenchmarkSummary: BenchmarkSummary | null = null;
 
@@ -82,6 +124,10 @@ hostEl.value = determineHost();
 
 renderBenchmarkSummary(null);
 setUploadStatus('Select an audio file to upload.', 'muted');
+
+// Set default mapreduce tasks
+mapReduceTasksEl.value = '[{"data": 5}, {"data": "hello"}, {"data": [1, 2, 3]}]';
+mapReduceReducerEl.value = 'collect';
 
 // Wire UI bindings
 attachUiBindings({
@@ -144,6 +190,15 @@ attachUiBindings({
       renderBenchmarkSummary(null, undefined, update.error);
     } else {
       renderBenchmarkSummary(null);
+    }
+  },
+  ui_set_mapreduce_result: (update) => {
+    if (update.kind === 'summary') {
+      renderMapReduceSummary(update.summary);
+    } else if (update.kind === 'error') {
+      renderMapReduceSummary(null, undefined, update.error);
+    } else {
+      renderMapReduceSummary(null);
     }
   },
 });
@@ -222,6 +277,40 @@ uploadAudioBtn.addEventListener('click', async () => {
 runBenchmarkBtn.addEventListener('click', () => {
   renderBenchmarkSummary(null, 'Benchmark requested…');
   clientApi.runBenchmark();
+});
+
+runMapReduceBtn.addEventListener('click', () => {
+  const tasks = mapReduceTasksEl.value.trim();
+  const reducer = mapReduceReducerEl.value;
+  if (!tasks) {
+    renderMapReduceSummary(null, undefined, 'Please provide tasks JSON');
+    return;
+  }
+  try {
+    JSON.parse(tasks); // Validate JSON
+    renderMapReduceSummary(null, 'MapReduce requested…');
+    clientApi.runMapReduce(tasks, reducer);
+  } catch (error) {
+    renderMapReduceSummary(null, undefined, 'Invalid JSON in tasks');
+  }
+});
+
+checkMapReduceStatusBtn.addEventListener('click', () => {
+  const requestId = mapReduceRequestIdEl.value.trim();
+  if (!requestId) {
+    renderMapReduceSummary(null, undefined, 'Please provide a request ID');
+    return;
+  }
+  clientApi.checkMapReduceStatus(requestId);
+});
+
+cancelMapReduceBtn.addEventListener('click', () => {
+  const requestId = mapReduceRequestIdEl.value.trim();
+  if (!requestId) {
+    renderMapReduceSummary(null, undefined, 'Please provide a request ID');
+    return;
+  }
+  clientApi.cancelMapReduce(requestId);
 });
 
 
@@ -329,6 +418,59 @@ function formatTimestamp(value: string): string {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+function renderMapReduceSummary(summary: MapReduceSummary | null, message?: string, error?: string) {
+  if (error) {
+    mapReduceSummaryEl.innerHTML = `<span class="text-sm text-red-600">${escapeHtml(error)}</span>`;
+    mapReduceTableBody.innerHTML = `<tr><td colspan="6" class="px-3 py-4 text-center text-red-500">${escapeHtml(error)}</td></tr>`;
+    return;
+  }
+
+  if (!summary) {
+    const text = message ?? 'No mapreduce results yet.';
+    mapReduceSummaryEl.textContent = text;
+    mapReduceTableBody.innerHTML = `<tr><td colspan="6" class="px-3 py-4 text-center text-slate-500">${escapeHtml(text)}</td></tr>`;
+    return;
+  }
+
+  const data = summary;
+  mapReduceSummaryEl.innerHTML = `
+    <div class="grid gap-2 text-sm text-slate-700 md:grid-cols-2">
+      <div><span class="font-medium">Request:</span> <span class="font-mono text-xs">${escapeHtml(data.requestId)}</span></div>
+      <div><span class="font-medium">Tasks:</span> ${data.completedTasks}/${data.totalTasks} completed</div>
+      <div><span class="font-medium">Duration:</span> ${data.durationMs.toFixed(0)} ms</div>
+      <div><span class="font-medium">Reducer:</span> ${escapeHtml(data.reducer)}</div>
+      <div><span class="font-medium">Started:</span> ${formatTimestamp(data.startedAt)}</div>
+      <div><span class="font-medium">Completed:</span> ${formatTimestamp(data.completedAt)}</div>
+    </div>
+    <div class="mt-2 text-xs text-slate-500">${escapeHtml(data.message)}</div>
+    ${data.failedTasks > 0 ? `<div class="mt-2 text-xs text-red-600">${data.failedTasks} task(s) failed</div>` : ''}
+    ${data.pendingTasks > 0 ? `<div class="mt-2 text-xs text-amber-600">${data.pendingTasks} task(s) pending</div>` : ''}
+    <div class="mt-2 text-sm">
+      <span class="font-medium">Reduced Result:</span>
+      <pre class="mt-1 text-xs bg-slate-50 p-2 rounded overflow-x-auto">${escapeHtml(JSON.stringify(data.reducedValue, null, 2))}</pre>
+    </div>
+  `;
+
+  const rows = data.results
+    .map((result) => `
+      <tr>
+        <td class="px-3 py-2 font-mono text-xs text-slate-800">${escapeHtml(result.taskId)}</td>
+        <td class="px-3 py-2 font-mono text-xs text-slate-600">${escapeHtml(result.assignedTo || '—')}</td>
+        <td class="px-3 py-2 text-center">${result.attempts}</td>
+        <td class="px-3 py-2 text-right">${result.durationMs ? result.durationMs.toFixed(0) : '—'}</td>
+        <td class="px-3 py-2 text-xs">
+          ${result.error ? `<span class="text-red-600">${escapeHtml(result.error)}</span>` : 
+            result.result !== undefined ? `<span class="text-green-600">${escapeHtml(JSON.stringify(result.result))}</span>` : 
+            '<span class="text-slate-500">—</span>'}
+        </td>
+        <td class="px-3 py-2 text-slate-500 text-xs">${result.durationMs ? '✓' : '—'}</td>
+      </tr>
+    `)
+    .join('');
+
+  mapReduceTableBody.innerHTML = rows || `<tr><td colspan="6" class="px-3 py-4 text-center text-slate-500">No task results</td></tr>`;
+}
+
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => {
     switch (char) {
@@ -348,7 +490,13 @@ function escapeHtml(value: string): string {
   });
 }
 
-function setUploadStatus(text: string, variant: 'muted' | 'info' | 'success' | 'error' = 'muted') {
-  uploadStatusEl.textContent = text;
-  uploadStatusEl.className = `text-xs ${variant === 'error' ? 'text-red-600' : variant === 'success' ? 'text-emerald-600' : variant === 'info' ? 'text-slate-600' : 'text-slate-500'}`;
+function setUploadStatus(message: string, type: 'info' | 'success' | 'error' | 'muted' = 'info') {
+  const classes = {
+    info: 'text-slate-600',
+    success: 'text-green-600',
+    error: 'text-red-600',
+    muted: 'text-slate-400'
+  };
+  uploadStatusEl.className = `text-xs ${classes[type]}`;
+  uploadStatusEl.textContent = message;
 }
