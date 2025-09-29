@@ -1,5 +1,5 @@
 import './style.css';
-import { attachUiBindings, clientApi, type AudioItem } from './client';
+import { attachUiBindings, clientApi, type AudioItem, determineHost } from './client';
 
 // DOM helpers
 const byId = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -114,12 +114,6 @@ logsEl.addEventListener('scroll', () => {
 });
 
 // Initialize host field from URL or default
-function determineHost(): string {
-  const params = new URLSearchParams(window.location.search);
-  if (params.has('ws')) return params.get('ws')!;
-  if (params.has('host')) return params.get('host')!;
-  return 'ws://localhost:8787/ws';
-}
 hostEl.value = determineHost();
 
 renderBenchmarkSummary(null);

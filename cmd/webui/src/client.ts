@@ -132,7 +132,8 @@ function setStatus(text: string) {
   ui?.ui_set_status_text?.(text);
 }
 
-function determineHost(): string {
+export function determineHost(): string {
+  if (import.meta.env.VITE_WS_URL) return import.meta.env.VITE_WS_URL;
   const params = new URLSearchParams(window.location.search);
   if (params.has("ws")) return params.get("ws")!;
   if (params.has("host")) return params.get("host")!;

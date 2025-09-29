@@ -4,14 +4,14 @@ import { defineConfig } from 'vite';
 // are transformed for modern environments.
 export default defineConfig({
   esbuild: {
-    target: 'esnext',
+    target: 'es2022',
   },
   build: {
-    target: 'esnext',
+    target: 'es2022',
   },
   optimizeDeps: {
     esbuildOptions: {
-      target: 'esnext',
+      target: 'es2022',
     },
   },
 });

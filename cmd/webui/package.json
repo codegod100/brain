@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:deploy": "node build-deploy.cjs",
     "preview": "vite preview"
   },
   "dependencies": {
